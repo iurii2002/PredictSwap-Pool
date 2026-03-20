@@ -27,14 +27,12 @@ contract FeeCollector is Ownable, ERC1155Holder {
         uint256 amount,
         address to
     );
-    event PoolAuthorised(address indexed pool);
-    event PoolRevoked(address indexed pool);
 
-    error NotAuthorisedPool();
     error ZeroAmount();
+    error ZeroAddress();
 
     constructor(address owner_) Ownable(owner_) {}
-
+    
     // ─── Fee receipt (called by SwapPool during swap) ─────────────────────────
 
     /**
@@ -42,6 +40,9 @@ contract FeeCollector is Ownable, ERC1155Holder {
      *         The pool must have already done safeTransferFrom before calling,
      *         OR this contract is the direct recipient in the pool's transfer.
      *         This function just emits the accounting event.
+     *
+     *          NOTE. Anyone can call this function and emit event. 
+     *          To use this event correctly filter by msg.sender == SwapPool
      */
     function recordFee(
         address token,
@@ -60,6 +61,7 @@ contract FeeCollector is Ownable, ERC1155Holder {
         uint256 amount,
         address to
     ) external onlyOwner {
+        if (to == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
         IERC1155(token).safeTransferFrom(address(this), to, tokenId, amount, "");
         emit FeeWithdrawn(token, tokenId, amount, to);
@@ -71,6 +73,11 @@ contract FeeCollector is Ownable, ERC1155Holder {
         uint256[] calldata amounts,
         address to
     ) external onlyOwner {
+        if (to == address(0)) revert ZeroAddress();
+        for (uint256 i; i < tokenIds.length; i++) {
+            if (amounts[i] == 0) revert ZeroAmount();
+            emit FeeWithdrawn(token, tokenIds[i], amounts[i], to);
+        }
         IERC1155(token).safeBatchTransferFrom(address(this), to, tokenIds, amounts, "");
     }
 
@@ -80,6 +87,7 @@ contract FeeCollector is Ownable, ERC1155Holder {
         uint256 tokenId,
         address to
     ) external onlyOwner {
+        if (to == address(0)) revert ZeroAddress();
         uint256 amount = IERC1155(token).balanceOf(address(this), tokenId);
         if (amount == 0) revert ZeroAmount();
         IERC1155(token).safeTransferFrom(address(this), to, tokenId, amount, "");
@@ -92,9 +100,11 @@ contract FeeCollector is Ownable, ERC1155Holder {
         uint256[] calldata tokenIds,
         address to
     ) external onlyOwner {
+        if (to == address(0)) revert ZeroAddress();
         uint256[] memory amounts = new uint256[](tokenIds.length);
         for (uint256 i; i < tokenIds.length; i++) {
             amounts[i] = IERC1155(token).balanceOf(address(this), tokenIds[i]);
+            emit FeeWithdrawn(token, tokenIds[i], amounts[i], to);
         }
         IERC1155(token).safeBatchTransferFrom(address(this), to, tokenIds, amounts, "");
     }

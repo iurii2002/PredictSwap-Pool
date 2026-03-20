@@ -26,18 +26,17 @@ contract PoolFactory is Ownable {
         address lpToken;
         uint256 polymarketTokenId;
         uint256 opinionTokenId;
-        uint256 resolutionDate;
-        bool    isActive;
     }
 
     // ─── Immutable config ─────────────────────────────────────────────────────
 
+    /// @notice if Polymarket or Opinion migrates their contract, redeploy this factory.
     /// @notice The single Polymarket ERC-1155 contract on Polygon
     address public immutable polymarketToken;
     /// @notice The single WrappedOpinionToken ERC-1155 contract on Polygon
     address public immutable opinionToken;
     /// @notice Protocol fee recipient
-    FeeCollector public immutable feeCollector;
+    FeeCollector public feeCollector;
 
     // ─── Configurable fees ────────────────────────────────────────────────────
 
@@ -62,17 +61,20 @@ contract PoolFactory is Ownable {
         address swapPool,
         address lpToken,
         uint256 polymarketTokenId,
-        uint256 opinionTokenId,
-        uint256 resolutionDate
+        uint256 opinionTokenId
     );
-    event PoolDeactivated(uint256 indexed poolId);
     event FeesUpdated(uint256 lpFeeBps, uint256 protocolFeeBps);
+    event PoolDepositsPaused(uint256 indexed poolId, bool paused);
+    event PoolSwapsPaused(uint256 indexed poolId, bool paused);
+
+    event FeeCollectorUpdated(address indexed oldFeeCollector, address indexed newFeeCollector);
 
     // ─── Errors ───────────────────────────────────────────────────────────────
 
     error PoolAlreadyExists(bytes32 key);
     error PoolNotFound(uint256 poolId);
-    error InvalidAddress();
+    error ZeroAddress();
+    error InvalidTokenID();
     error FeeTooHigh();
 
     // ─── Constructor ──────────────────────────────────────────────────────────
@@ -85,7 +87,7 @@ contract PoolFactory is Ownable {
     ) Ownable(owner_) {
         if (polymarketToken_ == address(0) ||
             opinionToken_    == address(0) ||
-            feeCollector_    == address(0)) revert InvalidAddress();
+            feeCollector_    == address(0)) revert ZeroAddress();
 
         polymarketToken = polymarketToken_;
         opinionToken    = opinionToken_;
@@ -119,7 +121,6 @@ contract PoolFactory is Ownable {
      *
      * @param polymarketTokenId_  Token ID on the Polymarket ERC-1155 contract
      * @param opinionTokenId_     Token ID on the WrappedOpinionToken contract
-     * @param resolutionDate_     Expected resolution timestamp (informational)
      * @param lpName              ERC-20 name   e.g. "PredictSwap BTC-YES LP"
      * @param lpSymbol            ERC-20 symbol e.g. "PS-BTC-YES"
      *
@@ -128,17 +129,17 @@ contract PoolFactory is Ownable {
     function createPool(
         uint256 polymarketTokenId_,
         uint256 opinionTokenId_,
-        uint256 resolutionDate_,
         string calldata lpName,
         string calldata lpSymbol
     ) external onlyOwner returns (uint256 poolId) {
+
+        if (polymarketTokenId_ == 0 || opinionTokenId_ == 0) revert InvalidTokenID();
+
         bytes32 key = _poolKey(polymarketTokenId_, opinionTokenId_);
         if (poolIndex[key] != 0) revert PoolAlreadyExists(key);
 
-        // Step 1: Deploy LPToken with factory as temporary authority
         LPToken lp = new LPToken(lpName, lpSymbol, address(this));
 
-        // Step 2: Deploy SwapPool — LP address is now known
         SwapPool pool_ = new SwapPool(
             address(this),
             polymarketTokenId_,
@@ -147,18 +148,14 @@ contract PoolFactory is Ownable {
             address(feeCollector)
         );
 
-        // Step 3: Wire LP token to its SwapPool (one-time, irreversible)
         lp.setPool(address(pool_));
 
-        // Register
         poolId = pools.length;
         pools.push(PoolInfo({
             swapPool:          address(pool_),
             lpToken:           address(lp),
             polymarketTokenId: polymarketTokenId_,
-            opinionTokenId:    opinionTokenId_,
-            resolutionDate:    resolutionDate_,
-            isActive:          true
+            opinionTokenId:    opinionTokenId_
         }));
         poolIndex[key] = poolId + 1;
 
@@ -167,8 +164,7 @@ contract PoolFactory is Ownable {
             address(pool_),
             address(lp),
             polymarketTokenId_,
-            opinionTokenId_,
-            resolutionDate_
+            opinionTokenId_
         );
     }
 
@@ -181,19 +177,6 @@ contract PoolFactory is Ownable {
 
     function getAllPools() external view returns (PoolInfo[] memory) {
         return pools;
-    }
-
-    function getActivePools() external view returns (PoolInfo[] memory) {
-        uint256 count;
-        for (uint256 i; i < pools.length; i++) {
-            if (pools[i].isActive) count++;
-        }
-        PoolInfo[] memory active = new PoolInfo[](count);
-        uint256 j;
-        for (uint256 i; i < pools.length; i++) {
-            if (pools[i].isActive) active[j++] = pools[i];
-        }
-        return active;
     }
 
     function poolCount() external view returns (uint256) {
@@ -211,10 +194,23 @@ contract PoolFactory is Ownable {
 
     // ─── Admin ────────────────────────────────────────────────────────────────
 
-    function deactivatePool(uint256 poolId) external onlyOwner {
+    // Update fee collecter for new pools, but not for the old one
+    function setFeeCollector(address feeCollector_) external onlyOwner {
+        if (feeCollector_ == address(0)) revert ZeroAddress();
+        emit FeeCollectorUpdated(address(feeCollector), feeCollector_);
+        feeCollector = FeeCollector(feeCollector_);
+    }
+
+    function setPoolDepositsPaused(uint256 poolId, bool paused_) external onlyOwner {
         if (poolId >= pools.length) revert PoolNotFound(poolId);
-        pools[poolId].isActive = false;
-        emit PoolDeactivated(poolId);
+        SwapPool(pools[poolId].swapPool).setDepositsPaused(paused_);
+        emit PoolDepositsPaused(poolId, paused_);
+    }
+
+    function setPoolSwapsPaused(uint256 poolId, bool paused_) external onlyOwner {
+        if (poolId >= pools.length) revert PoolNotFound(poolId);
+        SwapPool(pools[poolId].swapPool).setSwapsPaused(paused_);
+        emit PoolSwapsPaused(poolId, paused_);
     }
 
     // ─── Internal ─────────────────────────────────────────────────────────────

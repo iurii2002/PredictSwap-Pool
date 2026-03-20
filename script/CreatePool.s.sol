@@ -47,7 +47,6 @@ contract CreatePool is Script {
         uint256 poolId = factory.createPool(
             polyId,
             opinionId,
-            resolution,
             name,
             sym
         );

@@ -33,6 +33,8 @@ contract LPToken is ERC20 {
     error PoolAlreadySet();
     error ZeroAddress();
 
+    event PoolSet(address indexed pool);
+
     modifier onlyPool() {
         if (msg.sender != pool) revert OnlyPool();
         _;
@@ -58,6 +60,7 @@ contract LPToken is ERC20 {
         if (pool_ == address(0))    revert ZeroAddress();
         pool    = pool_;
         poolSet = true;
+        emit PoolSet(pool_);
     }
 
     function mint(address to, uint256 amount) external onlyPool {

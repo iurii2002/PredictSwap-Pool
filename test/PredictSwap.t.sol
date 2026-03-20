@@ -59,7 +59,6 @@ contract PredictSwapTest is Test {
         uint256 poolId = factory.createPool(
             POLY_ID,
             OPINION_ID,
-            block.timestamp + 30 days,
             "PredictSwap BTC-YES LP",
             "PS-BTC-YES"
         );
@@ -207,7 +206,6 @@ contract PredictSwapTest is Test {
         PoolFactory.PoolInfo memory info = factory.getPool(0);
         assertEq(info.polymarketTokenId, POLY_ID);
         assertEq(info.opinionTokenId,    OPINION_ID);
-        assertTrue(info.isActive);
         assertTrue(info.swapPool != address(0));
         assertTrue(info.lpToken  != address(0));
     }
@@ -215,19 +213,19 @@ contract PredictSwapTest is Test {
     function test_Factory_createPool_onlyOwner() public {
         vm.prank(attacker);
         vm.expectRevert();
-        factory.createPool(99, 88, block.timestamp + 1 days, "X", "X");
+        factory.createPool(99, 88, "X", "X");
     }
 
     function test_Factory_createPool_revertsDuplicate() public {
         vm.prank(owner);
         vm.expectRevert();
-        factory.createPool(POLY_ID, OPINION_ID, block.timestamp + 1 days, "Dup", "D");
+        factory.createPool(POLY_ID, OPINION_ID, "Dup", "D");
     }
 
     function test_Factory_createPool_multiplePools() public {
         vm.startPrank(owner);
-        factory.createPool(2, 511516, block.timestamp + 1 days, "Pool2", "P2");
-        factory.createPool(3, 511517, block.timestamp + 2 days, "Pool3", "P3");
+        factory.createPool(2, 511516, "Pool2", "P2");
+        factory.createPool(3, 511517, "Pool3", "P3");
         vm.stopPrank();
 
         assertEq(factory.poolCount(), 3);
@@ -243,19 +241,6 @@ contract PredictSwapTest is Test {
     function test_Factory_findPool_notFound() public view {
         (bool found,) = factory.findPool(999, 888);
         assertFalse(found);
-    }
-
-    function test_Factory_deactivatePool() public {
-        vm.prank(owner);
-        factory.deactivatePool(0);
-        assertFalse(factory.getPool(0).isActive);
-        assertEq(factory.getActivePools().length, 0);
-    }
-
-    function test_Factory_deactivatePool_revertsInvalidId() public {
-        vm.prank(owner);
-        vm.expectRevert();
-        factory.deactivatePool(999);
     }
 
     function test_Factory_setFees_success() public {
@@ -424,7 +409,7 @@ contract PredictSwapTest is Test {
         // This is a general sanity — exact case depends on balance
         // Let's just verify zero-liquidity case
         vm.startPrank(owner);
-        factory.createPool(777, 888, block.timestamp + 1 days, "Empty", "E");
+        factory.createPool(777, 888, "Empty", "E");
         vm.stopPrank();
         PoolFactory.PoolInfo memory info = factory.getPool(1);
         SwapPool emptyPool = SwapPool(info.swapPool);

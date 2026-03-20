@@ -53,8 +53,3 @@ contract WithdrawFees is Script {
         console.log("Withdrawn:    ", balance);
     }
 }
-
-// Minimal interface needed for balance check in script
-interface IERC1155 {
-    function balanceOf(address account, uint256 id) external view returns (uint256);
-}

@@ -61,19 +61,33 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
     /// @notice WrappedOpinion shares held in this pool
     uint256 public opinionBalance;
 
+    bool public depositsPaused;
+    bool public swapsPaused;
+
     // ─── Types ────────────────────────────────────────────────────────────────
 
     enum Side { POLYMARKET, OPINION }
 
     // ─── Events ───────────────────────────────────────────────────────────────
 
+    event DepositsPausedSet(bool paused);
+    event SwapsPausedSet(bool paused);
+
     event Deposited(address indexed user, Side side, uint256 sharesIn, uint256 lpMinted);
     event Withdrawn(address indexed user, Side sideReceived, uint256 lpBurned, uint256 sharesOut);
+    event WithdrawnSplit(address indexed user, uint256 lpBurned, uint256 preferredOut, Side preferredSide, uint256 fallbackOut, Side fallbackSide);
     event Swapped(address indexed user, Side fromSide, uint256 amountIn, uint256 amountOut, uint256 lpFee, uint256 protocolFee);
 
     // ─── Errors ───────────────────────────────────────────────────────────────
 
+    error DepositsPaused();
+    error SwapsPaused();
+
     error ZeroAmount();
+    error ZeroAddress();
+    error InvalidTokenID();
+    error DepositTooSmall();
+    error Unauthorized();
     error InsufficientLiquidity(uint256 available, uint256 required);
 
     // ─── Constructor ──────────────────────────────────────────────────────────
@@ -85,6 +99,14 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
         address lpToken_,
         address feeCollector_
     ) {
+
+        if (factory_ == address(0) ||
+            lpToken_    == address(0) ||
+            feeCollector_    == address(0)) revert ZeroAddress();
+
+        if (polymarketTokenId_ == 0 ||
+            opinionTokenId_    == 0) revert InvalidTokenID();
+
         factory           = PoolFactory(factory_);
         polymarketTokenId = polymarketTokenId_;
         opinionTokenId    = opinionTokenId_;
@@ -120,6 +142,7 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
      * @param amount  Number of ERC-1155 shares to deposit
      */
     function deposit(Side side, uint256 amount) external nonReentrant returns (uint256 lpMinted) {
+        if (depositsPaused) revert DepositsPaused();
         if (amount == 0) revert ZeroAmount();
 
         _pullTokens(side, msg.sender, amount);
@@ -132,6 +155,9 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
             // Calculated before _updateBalance so totalShares() is pre-deposit
             lpMinted = (amount * supply) / totalShares();
         }
+
+        // Ensure user receives at least 1 LP token
+        if (lpMinted == 0) revert DepositTooSmall();
 
         _updateBalance(side, amount, true);
         lpToken.mint(msg.sender, lpMinted);
@@ -186,8 +212,8 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
             _pushTokens(preferredSide, msg.sender, preferredAvail);
             _pushTokens(fallbackSide, msg.sender, remainder);
 
-            emit Withdrawn(msg.sender, preferredSide, 0, preferredAvail);
-            emit Withdrawn(msg.sender, fallbackSide, lpAmount, remainder);
+            emit WithdrawnSplit(msg.sender, lpAmount, preferredAvail, preferredSide, remainder, fallbackSide);
+
         }
     }
 
@@ -209,6 +235,7 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
         Side fromSide,
         uint256 amountIn
     ) external nonReentrant returns (uint256 amountOut) {
+        if (swapsPaused) revert SwapsPaused();
         if (amountIn == 0) revert ZeroAmount();
 
         Side toSide = _oppositeSide(fromSide);
@@ -236,6 +263,20 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
         _updateBalance(toSide, amountOut, false);
 
         emit Swapped(msg.sender, fromSide, amountIn, amountOut, lpFee, protocolFee);
+    }
+
+    // ─── Admin ────────────────────────────────────────────────────────────────
+
+    function setDepositsPaused(bool paused_) external {
+    if (msg.sender != address(factory)) revert Unauthorized();
+    depositsPaused = paused_;
+    emit DepositsPausedSet(paused_);
+}
+
+    function setSwapsPaused(bool paused_) external {
+        if (msg.sender != address(factory)) revert Unauthorized();
+        swapsPaused = paused_;
+        emit SwapsPausedSet(paused_);
     }
 
     // ─── Internal helpers ─────────────────────────────────────────────────────
