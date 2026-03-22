@@ -35,7 +35,6 @@ import "./PoolFactory.sol";
  *   Side.OPINION     = WrappedOpinion ERC-1155 shares (bridged from BSC)
  */
 contract SwapPool is ERC1155Holder, ReentrancyGuard {
-
     // ─── Constants ────────────────────────────────────────────────────────────
     // Fees are read from factory at swap time (configurable by owner)
 
@@ -50,7 +49,7 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
     uint256 public immutable opinionTokenId;
 
     /// @notice Associated LP token (ERC-20)
-    LPToken      public immutable lpToken;
+    LPToken public immutable lpToken;
     /// @notice Protocol fee recipient
     FeeCollector public immutable feeCollector;
 
@@ -66,7 +65,10 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
 
     // ─── Types ────────────────────────────────────────────────────────────────
 
-    enum Side { POLYMARKET, OPINION }
+    enum Side {
+        POLYMARKET,
+        OPINION
+    }
 
     // ─── Events ───────────────────────────────────────────────────────────────
 
@@ -75,8 +77,17 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
 
     event Deposited(address indexed user, Side side, uint256 sharesIn, uint256 lpMinted);
     event Withdrawn(address indexed user, Side sideReceived, uint256 lpBurned, uint256 sharesOut);
-    event WithdrawnSplit(address indexed user, uint256 lpBurned, uint256 preferredOut, Side preferredSide, uint256 fallbackOut, Side fallbackSide);
-    event Swapped(address indexed user, Side fromSide, uint256 amountIn, uint256 amountOut, uint256 lpFee, uint256 protocolFee);
+    event WithdrawnSplit(
+        address indexed user,
+        uint256 lpBurned,
+        uint256 preferredOut,
+        Side preferredSide,
+        uint256 fallbackOut,
+        Side fallbackSide
+    );
+    event Swapped(
+        address indexed user, Side fromSide, uint256 amountIn, uint256 amountOut, uint256 lpFee, uint256 protocolFee
+    );
 
     // ─── Errors ───────────────────────────────────────────────────────────────
 
@@ -99,19 +110,17 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
         address lpToken_,
         address feeCollector_
     ) {
+        if (factory_ == address(0) || lpToken_ == address(0) || feeCollector_ == address(0)) {
+            revert ZeroAddress();
+        }
 
-        if (factory_ == address(0) ||
-            lpToken_    == address(0) ||
-            feeCollector_    == address(0)) revert ZeroAddress();
+        if (polymarketTokenId_ == 0 || opinionTokenId_ == 0) revert InvalidTokenID();
 
-        if (polymarketTokenId_ == 0 ||
-            opinionTokenId_    == 0) revert InvalidTokenID();
-
-        factory           = PoolFactory(factory_);
+        factory = PoolFactory(factory_);
         polymarketTokenId = polymarketTokenId_;
-        opinionTokenId    = opinionTokenId_;
-        lpToken           = LPToken(lpToken_);
-        feeCollector      = FeeCollector(feeCollector_);
+        opinionTokenId = opinionTokenId_;
+        lpToken = LPToken(lpToken_);
+        feeCollector = FeeCollector(feeCollector_);
     }
 
     // ─── View helpers ─────────────────────────────────────────────────────────
@@ -175,10 +184,7 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
      * @param lpAmount       LP tokens to burn
      * @param preferredSide  Preferred side to receive (POLYMARKET or OPINION)
      */
-    function withdraw(
-        uint256 lpAmount,
-        Side preferredSide
-    ) external nonReentrant returns (uint256 sharesOut) {
+    function withdraw(uint256 lpAmount, Side preferredSide) external nonReentrant returns (uint256 sharesOut) {
         if (lpAmount == 0) revert ZeroAmount();
 
         sharesOut = (lpAmount * totalShares()) / lpToken.totalSupply();
@@ -186,22 +192,19 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
         // Burn LP first (CEI pattern)
         lpToken.burn(msg.sender, lpAmount);
 
-        (uint256 preferredAvail, uint256 fallbackAvail, Side fallbackSide) =
-            _sideBalances(preferredSide);
+        (uint256 preferredAvail, uint256 fallbackAvail, Side fallbackSide) = _sideBalances(preferredSide);
 
         if (sharesOut <= preferredAvail) {
             // Preferred side has enough
             _updateBalance(preferredSide, sharesOut, false);
             _pushTokens(preferredSide, msg.sender, sharesOut);
             emit Withdrawn(msg.sender, preferredSide, lpAmount, sharesOut);
-
         } else if (preferredAvail == 0) {
             // Preferred side empty — use fallback entirely
             if (sharesOut > fallbackAvail) revert InsufficientLiquidity(fallbackAvail, sharesOut);
             _updateBalance(fallbackSide, sharesOut, false);
             _pushTokens(fallbackSide, msg.sender, sharesOut);
             emit Withdrawn(msg.sender, fallbackSide, lpAmount, sharesOut);
-
         } else {
             // Split: drain preferred side, take remainder from fallback
             uint256 remainder = sharesOut - preferredAvail;
@@ -213,7 +216,6 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
             _pushTokens(fallbackSide, msg.sender, remainder);
 
             emit WithdrawnSplit(msg.sender, lpAmount, preferredAvail, preferredSide, remainder, fallbackSide);
-
         }
     }
 
@@ -231,18 +233,15 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
      * @param fromSide  Side being deposited
      * @param amountIn  Number of shares deposited
      */
-    function swap(
-        Side fromSide,
-        uint256 amountIn
-    ) external nonReentrant returns (uint256 amountOut) {
+    function swap(Side fromSide, uint256 amountIn) external nonReentrant returns (uint256 amountOut) {
         if (swapsPaused) revert SwapsPaused();
         if (amountIn == 0) revert ZeroAmount();
 
         Side toSide = _oppositeSide(fromSide);
 
-        uint256 lpFee       = (amountIn * factory.lpFeeBps()) / factory.FEE_DENOMINATOR();
+        uint256 lpFee = (amountIn * factory.lpFeeBps()) / factory.FEE_DENOMINATOR();
         uint256 protocolFee = (amountIn * factory.protocolFeeBps()) / factory.FEE_DENOMINATOR();
-        amountOut           = amountIn - lpFee - protocolFee;
+        amountOut = amountIn - lpFee - protocolFee;
 
         uint256 toBalance = _getBalance(toSide);
         if (amountOut > toBalance) revert InsufficientLiquidity(toBalance, amountOut);
@@ -268,10 +267,10 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
     // ─── Admin ────────────────────────────────────────────────────────────────
 
     function setDepositsPaused(bool paused_) external {
-    if (msg.sender != address(factory)) revert Unauthorized();
-    depositsPaused = paused_;
-    emit DepositsPausedSet(paused_);
-}
+        if (msg.sender != address(factory)) revert Unauthorized();
+        depositsPaused = paused_;
+        emit DepositsPausedSet(paused_);
+    }
 
     function setSwapsPaused(bool paused_) external {
         if (msg.sender != address(factory)) revert Unauthorized();

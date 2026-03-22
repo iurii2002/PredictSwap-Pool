@@ -22,13 +22,12 @@ import "../src/FeeCollector.sol";
  *   forge script script/WithdrawFees.s.sol --rpc-url polygon --broadcast
  */
 contract WithdrawFees is Script {
-
     function run() external {
-        uint256 ownerKey      = vm.envUint("DEPLOYER_PRIVATE_KEY");
+        uint256 ownerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address collectorAddr = vm.envAddress("FEE_COLLECTOR_ADDRESS");
-        address tokenAddr     = vm.envAddress("FEE_TOKEN_ADDRESS");
-        address recipient     = vm.envAddress("FEE_RECIPIENT_ADDRESS");
-        uint256 tokenId       = vm.envUint("FEE_TOKEN_ID");
+        address tokenAddr = vm.envAddress("FEE_TOKEN_ADDRESS");
+        address recipient = vm.envAddress("FEE_RECIPIENT_ADDRESS");
+        uint256 tokenId = vm.envUint("FEE_TOKEN_ID");
 
         FeeCollector collector = FeeCollector(collectorAddr);
 

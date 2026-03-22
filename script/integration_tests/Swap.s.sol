@@ -24,12 +24,11 @@ import "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
  *   forge script script/Swap.s.sol --rpc-url polygon --broadcast
  */
 contract Swap is Script {
-
     function run() external {
-        uint256 key      = vm.envUint("DEPLOYER_PRIVATE_KEY");
+        uint256 key = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address factAddr = vm.envAddress("POOL_FACTORY_ADDRESS");
-        uint256 poolId   = vm.envUint("POOL_ID");
-        uint256 sideRaw  = vm.envUint("SWAP_FROM_SIDE");
+        uint256 poolId = vm.envUint("POOL_ID");
+        uint256 sideRaw = vm.envUint("SWAP_FROM_SIDE");
         uint256 amountIn = vm.envUint("SWAP_AMOUNT");
 
         address sender = vm.addr(key);
@@ -39,32 +38,20 @@ contract Swap is Script {
         SwapPool pool = SwapPool(info.swapPool);
 
         SwapPool.Side fromSide = SwapPool.Side(sideRaw);
-        SwapPool.Side toSide   = fromSide == SwapPool.Side.POLYMARKET
-            ? SwapPool.Side.OPINION
-            : SwapPool.Side.POLYMARKET;
+        SwapPool.Side toSide = fromSide == SwapPool.Side.POLYMARKET ? SwapPool.Side.OPINION : SwapPool.Side.POLYMARKET;
 
-        address fromToken = fromSide == SwapPool.Side.POLYMARKET
-            ? factory.polymarketToken()
-            : factory.opinionToken();
-        address toToken   = fromSide == SwapPool.Side.POLYMARKET
-            ? factory.opinionToken()
-            : factory.polymarketToken();
-        uint256 fromId    = fromSide == SwapPool.Side.POLYMARKET
-            ? info.polymarketTokenId
-            : info.opinionTokenId;
-        uint256 toId      = fromSide == SwapPool.Side.POLYMARKET
-            ? info.opinionTokenId
-            : info.polymarketTokenId;
+        address fromToken = fromSide == SwapPool.Side.POLYMARKET ? factory.polymarketToken() : factory.opinionToken();
+        address toToken = fromSide == SwapPool.Side.POLYMARKET ? factory.opinionToken() : factory.polymarketToken();
+        uint256 fromId = fromSide == SwapPool.Side.POLYMARKET ? info.polymarketTokenId : info.opinionTokenId;
+        uint256 toId = fromSide == SwapPool.Side.POLYMARKET ? info.opinionTokenId : info.polymarketTokenId;
 
         // Calculate expected output for display
-        uint256 totalFee    = factory.lpFeeBps() + factory.protocolFeeBps();
+        uint256 totalFee = factory.lpFeeBps() + factory.protocolFeeBps();
         uint256 expectedOut = amountIn - (amountIn * totalFee / factory.FEE_DENOMINATOR());
 
         uint256 fromBalance = IERC1155(fromToken).balanceOf(sender, fromId);
-        uint256 toBalance   = IERC1155(toToken).balanceOf(sender, toId);
-        uint256 poolToLiq   = fromSide == SwapPool.Side.POLYMARKET
-            ? pool.opinionBalance()
-            : pool.polymarketBalance();
+        uint256 toBalance = IERC1155(toToken).balanceOf(sender, toId);
+        uint256 poolToLiq = fromSide == SwapPool.Side.POLYMARKET ? pool.opinionBalance() : pool.polymarketBalance();
 
         console.log("=== Swap ===");
         console.log("Pool ID:           ", poolId);

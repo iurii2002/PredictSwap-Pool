@@ -27,20 +27,19 @@ import "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
  *   forge script script/Withdraw.s.sol --rpc-url polygon --broadcast
  */
 contract Withdraw is Script {
-
     function run() external {
-        uint256 key       = vm.envUint("DEPLOYER_PRIVATE_KEY");
-        address factAddr  = vm.envAddress("POOL_FACTORY_ADDRESS");
-        uint256 poolId    = vm.envUint("POOL_ID");
-        uint256 lpAmount  = vm.envUint("WITHDRAW_LP_AMOUNT");
-        uint256 sideRaw   = vm.envUint("WITHDRAW_PREFERRED_SIDE");
+        uint256 key = vm.envUint("DEPLOYER_PRIVATE_KEY");
+        address factAddr = vm.envAddress("POOL_FACTORY_ADDRESS");
+        uint256 poolId = vm.envUint("POOL_ID");
+        uint256 lpAmount = vm.envUint("WITHDRAW_LP_AMOUNT");
+        uint256 sideRaw = vm.envUint("WITHDRAW_PREFERRED_SIDE");
 
         address sender = vm.addr(key);
         PoolFactory factory = PoolFactory(factAddr);
 
         PoolFactory.PoolInfo memory info = factory.getPool(poolId);
         SwapPool pool = SwapPool(info.swapPool);
-        LPToken lp    = LPToken(info.lpToken);
+        LPToken lp = LPToken(info.lpToken);
 
         uint256 lpBalance = lp.balanceOf(sender);
 
@@ -53,12 +52,10 @@ contract Withdraw is Script {
 
         // Calculate expected shares out for display
         uint256 totalShares = pool.totalShares();
-        uint256 lpSupply    = lp.totalSupply();
-        uint256 expectedOut = lpSupply > 0
-            ? (lpAmount * totalShares) / lpSupply
-            : 0;
+        uint256 lpSupply = lp.totalSupply();
+        uint256 expectedOut = lpSupply > 0 ? (lpAmount * totalShares) / lpSupply : 0;
 
-        uint256 polyBal   = IERC1155(factory.polymarketToken()).balanceOf(sender, info.polymarketTokenId);
+        uint256 polyBal = IERC1155(factory.polymarketToken()).balanceOf(sender, info.polymarketTokenId);
         uint256 opinionBal = IERC1155(factory.opinionToken()).balanceOf(sender, info.opinionTokenId);
 
         console.log("=== Withdraw ===");
@@ -87,7 +84,9 @@ contract Withdraw is Script {
         console.log("=== Done ===");
         console.log("Shares received:  ", sharesOut);
         console.log("LP remaining:     ", lp.balanceOf(sender));
-        console.log("Wallet POLY after:   ", IERC1155(factory.polymarketToken()).balanceOf(sender, info.polymarketTokenId));
+        console.log(
+            "Wallet POLY after:   ", IERC1155(factory.polymarketToken()).balanceOf(sender, info.polymarketTokenId)
+        );
         console.log("Wallet OPINION after:", IERC1155(factory.opinionToken()).balanceOf(sender, info.opinionTokenId));
     }
 }

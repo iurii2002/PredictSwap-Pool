@@ -23,32 +23,27 @@ import "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
  *   forge script script/Deposit.s.sol --rpc-url polygon --broadcast
  */
 contract Deposit is Script {
-
     function run() external {
-        uint256 key      = vm.envUint("DEPLOYER_PRIVATE_KEY");
+        uint256 key = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address factAddr = vm.envAddress("POOL_FACTORY_ADDRESS");
-        uint256 poolId   = vm.envUint("POOL_ID");
-        uint256 sideRaw  = vm.envUint("DEPOSIT_SIDE");
-        uint256 amount   = vm.envUint("DEPOSIT_AMOUNT");
+        uint256 poolId = vm.envUint("POOL_ID");
+        uint256 sideRaw = vm.envUint("DEPOSIT_SIDE");
+        uint256 amount = vm.envUint("DEPOSIT_AMOUNT");
 
         address sender = vm.addr(key);
         PoolFactory factory = PoolFactory(factAddr);
 
         PoolFactory.PoolInfo memory info = factory.getPool(poolId);
         SwapPool pool = SwapPool(info.swapPool);
-        LPToken lp    = LPToken(info.lpToken);
+        LPToken lp = LPToken(info.lpToken);
 
         SwapPool.Side side = SwapPool.Side(sideRaw);
-        address tokenAddr  = side == SwapPool.Side.POLYMARKET
-            ? factory.polymarketToken()
-            : factory.opinionToken();
-        uint256 tokenId    = side == SwapPool.Side.POLYMARKET
-            ? info.polymarketTokenId
-            : info.opinionTokenId;
+        address tokenAddr = side == SwapPool.Side.POLYMARKET ? factory.polymarketToken() : factory.opinionToken();
+        uint256 tokenId = side == SwapPool.Side.POLYMARKET ? info.polymarketTokenId : info.opinionTokenId;
 
         uint256 tokenBalance = IERC1155(tokenAddr).balanceOf(sender, tokenId);
-        uint256 lpBefore     = lp.balanceOf(sender);
-        uint256 rateBefore   = pool.exchangeRate();
+        uint256 lpBefore = lp.balanceOf(sender);
+        uint256 rateBefore = pool.exchangeRate();
 
         console.log("=== Deposit ===");
         console.log("Pool ID:        ", poolId);

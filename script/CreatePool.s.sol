@@ -21,15 +21,14 @@ import "../src/PoolFactory.sol";
  *   forge script script/CreatePool.s.sol --rpc-url polygon --broadcast
  */
 contract CreatePool is Script {
-
     function run() external {
-        uint256 ownerKey    = vm.envUint("DEPLOYER_PRIVATE_KEY");
+        uint256 ownerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address factoryAddr = vm.envAddress("POOL_FACTORY_ADDRESS");
-        uint256 polyId      = vm.envUint("POLY_TOKEN_ID");
-        uint256 opinionId   = vm.envUint("OPINION_TOKEN_ID");
-        uint256 resolution  = vm.envUint("RESOLUTION_DATE");
-        string memory name  = vm.envString("LP_NAME");
-        string memory sym   = vm.envString("LP_SYMBOL");
+        uint256 polyId = vm.envUint("POLY_TOKEN_ID");
+        uint256 opinionId = vm.envUint("OPINION_TOKEN_ID");
+        uint256 resolution = vm.envUint("RESOLUTION_DATE");
+        string memory name = vm.envString("LP_NAME");
+        string memory sym = vm.envString("LP_SYMBOL");
 
         PoolFactory factory = PoolFactory(factoryAddr);
 
@@ -44,12 +43,7 @@ contract CreatePool is Script {
 
         vm.startBroadcast(ownerKey);
 
-        uint256 poolId = factory.createPool(
-            polyId,
-            opinionId,
-            name,
-            sym
-        );
+        uint256 poolId = factory.createPool(polyId, opinionId, name, sym);
 
         vm.stopBroadcast();
 

@@ -26,7 +26,7 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 contract LPToken is ERC20 {
     address public pool;
     address public immutable factory;
-    bool    private poolSet;
+    bool private poolSet;
 
     error OnlyPool();
     error OnlyFactory();
@@ -40,11 +40,7 @@ contract LPToken is ERC20 {
         _;
     }
 
-    constructor(
-        string memory name_,
-        string memory symbol_,
-        address factory_
-    ) ERC20(name_, symbol_) {
+    constructor(string memory name_, string memory symbol_, address factory_) ERC20(name_, symbol_) {
         if (factory_ == address(0)) revert ZeroAddress();
         factory = factory_;
     }
@@ -55,10 +51,10 @@ contract LPToken is ERC20 {
      *         Cannot be called again once set.
      */
     function setPool(address pool_) external {
-        if (msg.sender != factory)  revert OnlyFactory();
-        if (poolSet)                revert PoolAlreadySet();
-        if (pool_ == address(0))    revert ZeroAddress();
-        pool    = pool_;
+        if (msg.sender != factory) revert OnlyFactory();
+        if (poolSet) revert PoolAlreadySet();
+        if (pool_ == address(0)) revert ZeroAddress();
+        pool = pool_;
         poolSet = true;
         emit PoolSet(pool_);
     }

@@ -19,11 +19,10 @@ import "../src/PoolFactory.sol";
  *   forge script script/SetFees.s.sol --rpc-url polygon --broadcast
  */
 contract SetFees is Script {
-
     function run() external {
-        uint256 ownerKey    = vm.envUint("DEPLOYER_PRIVATE_KEY");
+        uint256 ownerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address factoryAddr = vm.envAddress("POOL_FACTORY_ADDRESS");
-        uint256 lpFee       = vm.envUint("LP_FEE_BPS");
+        uint256 lpFee = vm.envUint("LP_FEE_BPS");
         uint256 protocolFee = vm.envUint("PROTOCOL_FEE_BPS");
 
         PoolFactory factory = PoolFactory(factoryAddr);

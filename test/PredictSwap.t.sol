@@ -18,60 +18,49 @@ import "./MockERC1155.sol";
  *   SwapPool      — deposit, withdraw (3 paths), swap, exchange rate, fee math
  */
 contract PredictSwapTest is Test {
-
     // ─── Actors ───────────────────────────────────────────────────────────────
-    address owner   = makeAddr("owner");
-    address lp1     = makeAddr("lp1");
-    address lp2     = makeAddr("lp2");
+    address owner = makeAddr("owner");
+    address lp1 = makeAddr("lp1");
+    address lp2 = makeAddr("lp2");
     address swapper = makeAddr("swapper");
     address attacker = makeAddr("attacker");
 
     // ─── Token IDs ────────────────────────────────────────────────────────────
-    uint256 constant POLY_ID    = 1;
+    uint256 constant POLY_ID = 1;
     uint256 constant OPINION_ID = 511515;
 
     // ─── Contracts ────────────────────────────────────────────────────────────
-    MockERC1155  polyToken;
-    MockERC1155  opinionToken;
+    MockERC1155 polyToken;
+    MockERC1155 opinionToken;
     FeeCollector feeCollector;
-    PoolFactory  factory;
-    SwapPool     pool;
-    LPToken      lp;
+    PoolFactory factory;
+    SwapPool pool;
+    LPToken lp;
 
     // ─── Setup ────────────────────────────────────────────────────────────────
 
     function setUp() public {
         // Deploy mock tokens
-        polyToken    = new MockERC1155();
+        polyToken = new MockERC1155();
         opinionToken = new MockERC1155();
 
         // Deploy core protocol
         vm.startPrank(owner);
         feeCollector = new FeeCollector(owner);
-        factory = new PoolFactory(
-            address(polyToken),
-            address(opinionToken),
-            address(feeCollector),
-            owner
-        );
+        factory = new PoolFactory(address(polyToken), address(opinionToken), address(feeCollector), owner);
 
         // Create one pool
-        uint256 poolId = factory.createPool(
-            POLY_ID,
-            OPINION_ID,
-            "PredictSwap BTC-YES LP",
-            "PS-BTC-YES"
-        );
+        uint256 poolId = factory.createPool(POLY_ID, OPINION_ID, "PredictSwap BTC-YES LP", "PS-BTC-YES");
         vm.stopPrank();
 
         PoolFactory.PoolInfo memory info = factory.getPool(poolId);
         pool = SwapPool(info.swapPool);
-        lp   = LPToken(info.lpToken);
+        lp = LPToken(info.lpToken);
 
         // Fund actors with ERC-1155 tokens and approvals
-        _fundAndApprove(lp1,     10_000, 10_000);
-        _fundAndApprove(lp2,     10_000, 10_000);
-        _fundAndApprove(swapper, 5_000,  5_000);
+        _fundAndApprove(lp1, 10_000, 10_000);
+        _fundAndApprove(lp2, 10_000, 10_000);
+        _fundAndApprove(swapper, 5_000, 5_000);
     }
 
     function _fundAndApprove(address user, uint256 polyAmt, uint256 opinionAmt) internal {
@@ -144,7 +133,9 @@ contract PredictSwapTest is Test {
         multi.mint(address(feeCollector), 3, 300);
 
         uint256[] memory ids = new uint256[](3);
-        ids[0] = 1; ids[1] = 2; ids[2] = 3;
+        ids[0] = 1;
+        ids[1] = 2;
+        ids[2] = 3;
 
         vm.prank(owner);
         feeCollector.withdrawAllBatch(address(multi), ids, owner);
@@ -205,9 +196,9 @@ contract PredictSwapTest is Test {
     function test_Factory_createPool_registersCorrectly() public {
         PoolFactory.PoolInfo memory info = factory.getPool(0);
         assertEq(info.polymarketTokenId, POLY_ID);
-        assertEq(info.opinionTokenId,    OPINION_ID);
+        assertEq(info.opinionTokenId, OPINION_ID);
         assertTrue(info.swapPool != address(0));
-        assertTrue(info.lpToken  != address(0));
+        assertTrue(info.lpToken != address(0));
     }
 
     function test_Factory_createPool_onlyOwner() public {
@@ -377,14 +368,14 @@ contract PredictSwapTest is Test {
         vm.prank(lp1);
         pool.deposit(SwapPool.Side.OPINION, 400);
 
-        uint256 polyBefore    = polyToken.balanceOf(lp1, POLY_ID);
+        uint256 polyBefore = polyToken.balanceOf(lp1, POLY_ID);
         uint256 opinionBefore = opinionToken.balanceOf(lp1, OPINION_ID);
 
         // Withdraw 1000 LP preferring POLYMARKET — pool only has 600, remainder from OPINION
         vm.prank(lp1);
         pool.withdraw(1000, SwapPool.Side.POLYMARKET);
 
-        assertEq(polyToken.balanceOf(lp1, POLY_ID),       polyBefore + 600);
+        assertEq(polyToken.balanceOf(lp1, POLY_ID), polyBefore + 600);
         assertEq(opinionToken.balanceOf(lp1, OPINION_ID), opinionBefore + 400);
         assertEq(pool.totalShares(), 0);
     }
@@ -454,7 +445,7 @@ contract PredictSwapTest is Test {
         pool.deposit(SwapPool.Side.OPINION, 5000);
 
         uint256 opinionBefore = opinionToken.balanceOf(swapper, OPINION_ID);
-        uint256 feesBefore    = opinionToken.balanceOf(address(feeCollector), OPINION_ID);
+        uint256 feesBefore = opinionToken.balanceOf(address(feeCollector), OPINION_ID);
 
         vm.prank(swapper);
         uint256 amountOut = pool.swap(SwapPool.Side.POLYMARKET, 1000);
@@ -539,7 +530,7 @@ contract PredictSwapTest is Test {
         // fromSide (POLY): +1000 deposited, -1 protocol fee out = net +999 (includes 3 LP fee)
         // toSide (OPINION): -996 released to swapper
         assertEq(pool.polymarketBalance(), 5000 + 999);
-        assertEq(pool.opinionBalance(),    5000 - 996);
+        assertEq(pool.opinionBalance(), 5000 - 996);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

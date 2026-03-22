@@ -14,25 +14,14 @@ import "@openzeppelin/contracts/token/ERC1155/utils/ERC1155Holder.sol";
  *         Any registered SwapPool can push fees in; only owner can pull out.
  */
 contract FeeCollector is Ownable, ERC1155Holder {
-
-    event FeeReceived(
-        address indexed pool,
-        address indexed token,
-        uint256 tokenId,
-        uint256 amount
-    );
-    event FeeWithdrawn(
-        address indexed token,
-        uint256 tokenId,
-        uint256 amount,
-        address to
-    );
+    event FeeReceived(address indexed pool, address indexed token, uint256 tokenId, uint256 amount);
+    event FeeWithdrawn(address indexed token, uint256 tokenId, uint256 amount, address to);
 
     error ZeroAmount();
     error ZeroAddress();
 
     constructor(address owner_) Ownable(owner_) {}
-    
+
     // ─── Fee receipt (called by SwapPool during swap) ─────────────────────────
 
     /**
@@ -41,38 +30,27 @@ contract FeeCollector is Ownable, ERC1155Holder {
      *         OR this contract is the direct recipient in the pool's transfer.
      *         This function just emits the accounting event.
      *
-     *          NOTE. Anyone can call this function and emit event. 
+     *          NOTE. Anyone can call this function and emit event.
      *          To use this event correctly filter by msg.sender == SwapPool
      */
-    function recordFee(
-        address token,
-        uint256 tokenId,
-        uint256 amount
-    ) external {
+    function recordFee(address token, uint256 tokenId, uint256 amount) external {
         if (amount == 0) revert ZeroAmount();
         emit FeeReceived(msg.sender, token, tokenId, amount);
     }
 
     // ─── Withdrawal (team only) ───────────────────────────────────────────────
 
-    function withdraw(
-        address token,
-        uint256 tokenId,
-        uint256 amount,
-        address to
-    ) external onlyOwner {
+    function withdraw(address token, uint256 tokenId, uint256 amount, address to) external onlyOwner {
         if (to == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
         IERC1155(token).safeTransferFrom(address(this), to, tokenId, amount, "");
         emit FeeWithdrawn(token, tokenId, amount, to);
     }
 
-    function withdrawBatch(
-        address token,
-        uint256[] calldata tokenIds,
-        uint256[] calldata amounts,
-        address to
-    ) external onlyOwner {
+    function withdrawBatch(address token, uint256[] calldata tokenIds, uint256[] calldata amounts, address to)
+        external
+        onlyOwner
+    {
         if (to == address(0)) revert ZeroAddress();
         for (uint256 i; i < tokenIds.length; i++) {
             if (amounts[i] == 0) revert ZeroAmount();
@@ -81,12 +59,8 @@ contract FeeCollector is Ownable, ERC1155Holder {
         IERC1155(token).safeBatchTransferFrom(address(this), to, tokenIds, amounts, "");
     }
 
-        /// @notice Withdraw the entire balance of a single token ID
-    function withdrawAll(
-        address token,
-        uint256 tokenId,
-        address to
-    ) external onlyOwner {
+    /// @notice Withdraw the entire balance of a single token ID
+    function withdrawAll(address token, uint256 tokenId, address to) external onlyOwner {
         if (to == address(0)) revert ZeroAddress();
         uint256 amount = IERC1155(token).balanceOf(address(this), tokenId);
         if (amount == 0) revert ZeroAmount();
@@ -95,11 +69,7 @@ contract FeeCollector is Ownable, ERC1155Holder {
     }
 
     /// @notice Withdraw the entire balance of multiple token IDs in one call
-    function withdrawAllBatch(
-        address token,
-        uint256[] calldata tokenIds,
-        address to
-    ) external onlyOwner {
+    function withdrawAllBatch(address token, uint256[] calldata tokenIds, address to) external onlyOwner {
         if (to == address(0)) revert ZeroAddress();
         uint256[] memory amounts = new uint256[](tokenIds.length);
         for (uint256 i; i < tokenIds.length; i++) {

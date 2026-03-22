@@ -18,7 +18,6 @@ import "./FeeCollector.sol";
  *         All pools read fees from here at swap time.
  */
 contract PoolFactory is Ownable {
-
     // ─── Types ────────────────────────────────────────────────────────────────
 
     struct PoolInfo {
@@ -40,12 +39,12 @@ contract PoolFactory is Ownable {
 
     // ─── Configurable fees ────────────────────────────────────────────────────
 
-    uint256 public lpFeeBps       = 30;  // 0.30% default
-    uint256 public protocolFeeBps = 10;  // 0.10% default
+    uint256 public lpFeeBps = 30; // 0.30% default
+    uint256 public protocolFeeBps = 10; // 0.10% default
 
-    uint256 public constant FEE_DENOMINATOR  = 10_000;
-    uint256 public constant MAX_LP_FEE       = 100;   // 1.00% hard cap
-    uint256 public constant MAX_PROTOCOL_FEE = 50;    // 0.50% hard cap
+    uint256 public constant FEE_DENOMINATOR = 10_000;
+    uint256 public constant MAX_LP_FEE = 100; // 1.00% hard cap
+    uint256 public constant MAX_PROTOCOL_FEE = 50; // 0.50% hard cap
 
     // ─── State ────────────────────────────────────────────────────────────────
 
@@ -57,11 +56,7 @@ contract PoolFactory is Ownable {
     // ─── Events ───────────────────────────────────────────────────────────────
 
     event PoolCreated(
-        uint256 indexed poolId,
-        address swapPool,
-        address lpToken,
-        uint256 polymarketTokenId,
-        uint256 opinionTokenId
+        uint256 indexed poolId, address swapPool, address lpToken, uint256 polymarketTokenId, uint256 opinionTokenId
     );
     event FeesUpdated(uint256 lpFeeBps, uint256 protocolFeeBps);
     event PoolDepositsPaused(uint256 indexed poolId, bool paused);
@@ -79,19 +74,14 @@ contract PoolFactory is Ownable {
 
     // ─── Constructor ──────────────────────────────────────────────────────────
 
-    constructor(
-        address polymarketToken_,
-        address opinionToken_,
-        address feeCollector_,
-        address owner_
-    ) Ownable(owner_) {
-        if (polymarketToken_ == address(0) ||
-            opinionToken_    == address(0) ||
-            feeCollector_    == address(0)) revert ZeroAddress();
+    constructor(address polymarketToken_, address opinionToken_, address feeCollector_, address owner_)
+        Ownable(owner_)
+    {
+        if (polymarketToken_ == address(0) || opinionToken_ == address(0) || feeCollector_ == address(0)) revert ZeroAddress();
 
         polymarketToken = polymarketToken_;
-        opinionToken    = opinionToken_;
-        feeCollector    = FeeCollector(feeCollector_);
+        opinionToken = opinionToken_;
+        feeCollector = FeeCollector(feeCollector_);
     }
 
     // ─── Fee config ───────────────────────────────────────────────────────────
@@ -103,7 +93,7 @@ contract PoolFactory is Ownable {
      */
     function setFees(uint256 lpFeeBps_, uint256 protocolFeeBps_) external onlyOwner {
         if (lpFeeBps_ > MAX_LP_FEE || protocolFeeBps_ > MAX_PROTOCOL_FEE) revert FeeTooHigh();
-        lpFeeBps       = lpFeeBps_;
+        lpFeeBps = lpFeeBps_;
         protocolFeeBps = protocolFeeBps_;
         emit FeesUpdated(lpFeeBps_, protocolFeeBps_);
     }
@@ -132,7 +122,6 @@ contract PoolFactory is Ownable {
         string calldata lpName,
         string calldata lpSymbol
     ) external onlyOwner returns (uint256 poolId) {
-
         if (polymarketTokenId_ == 0 || opinionTokenId_ == 0) revert InvalidTokenID();
 
         bytes32 key = _poolKey(polymarketTokenId_, opinionTokenId_);
@@ -140,32 +129,23 @@ contract PoolFactory is Ownable {
 
         LPToken lp = new LPToken(lpName, lpSymbol, address(this));
 
-        SwapPool pool_ = new SwapPool(
-            address(this),
-            polymarketTokenId_,
-            opinionTokenId_,
-            address(lp),
-            address(feeCollector)
-        );
+        SwapPool pool_ =
+            new SwapPool(address(this), polymarketTokenId_, opinionTokenId_, address(lp), address(feeCollector));
 
         lp.setPool(address(pool_));
 
         poolId = pools.length;
-        pools.push(PoolInfo({
-            swapPool:          address(pool_),
-            lpToken:           address(lp),
-            polymarketTokenId: polymarketTokenId_,
-            opinionTokenId:    opinionTokenId_
-        }));
+        pools.push(
+            PoolInfo({
+                swapPool: address(pool_),
+                lpToken: address(lp),
+                polymarketTokenId: polymarketTokenId_,
+                opinionTokenId: opinionTokenId_
+            })
+        );
         poolIndex[key] = poolId + 1;
 
-        emit PoolCreated(
-            poolId,
-            address(pool_),
-            address(lp),
-            polymarketTokenId_,
-            opinionTokenId_
-        );
+        emit PoolCreated(poolId, address(pool_), address(lp), polymarketTokenId_, opinionTokenId_);
     }
 
     // ─── Registry reads ───────────────────────────────────────────────────────
@@ -183,10 +163,11 @@ contract PoolFactory is Ownable {
         return pools.length;
     }
 
-    function findPool(
-        uint256 polymarketTokenId_,
-        uint256 opinionTokenId_
-    ) external view returns (bool found, uint256 poolId) {
+    function findPool(uint256 polymarketTokenId_, uint256 opinionTokenId_)
+        external
+        view
+        returns (bool found, uint256 poolId)
+    {
         uint256 idx = poolIndex[_poolKey(polymarketTokenId_, opinionTokenId_)];
         if (idx == 0) return (false, 0);
         return (true, idx - 1);
