@@ -229,11 +229,11 @@ contract PoolFactory is Ownable {
         emit PoolSwapsPaused(poolId, paused_);
     }
 
-    /// @notice Mark a pool as resolved. Cross-side withdrawals become fee-free.
+    /// @notice Mark a pool as resolved  and pause deposits. Cross-side withdrawals become fee-free.
     ///         Call once the underlying prediction market event has settled.
-    function resolvePool(uint256 poolId) external onlyOwner {
+    function resolvePoolAndPausedDeposits(uint256 poolId) external onlyOwner {
         if (poolId >= pools.length) revert PoolNotFound(poolId);
-        SwapPool(payable(pools[poolId].swapPool)).setResolved();
+        SwapPool(payable(pools[poolId].swapPool)).setResolvedAndPausedDeposits();
         emit PoolResolved(poolId, true);
     }
 

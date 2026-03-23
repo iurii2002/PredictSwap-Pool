@@ -63,8 +63,11 @@ import "./PoolFactory.sol";
 contract SwapPool is ERC1155Holder, ReentrancyGuard {
 
     using SafeERC20 for IERC20;
-
+    
     // ─── Immutable config ─────────────────────────────────────────────────────
+
+    /// @notice Precision scalar for exchange rate fixed-point arithmetic.
+    uint256 private constant RATE_PRECISION = 1e18;
 
     /// @notice Factory that deployed this pool — source of token contract addresses and fees
     PoolFactory public immutable factory;
@@ -210,8 +213,30 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
      */
     function exchangeRate() public view returns (uint256) {
         uint256 supply = totalLpSupply();
-        if (supply == 0) return 1e18;
-        return (totalShares() * 1e18) / supply;
+        if (supply == 0) return RATE_PRECISION;
+        return (totalShares() * RATE_PRECISION) / supply;
+    }
+
+    // ─── Fee helper ───────────────────────────────────────────────────────────
+
+    /**
+     * @notice Compute LP fee and protocol fee using ceiling division.
+     *         Ceiling division ensures any non-zero amount with non-zero bps
+     *         pays at least 1 unit of fee, preventing fee evasion via splitting.
+     *
+     * @param amount     Gross share amount subject to fees
+     * @return lpFee     Fee retained by the pool (auto-compounds for LPs)
+     * @return protocolFee Fee transferred to FeeCollector
+     */
+    function _computeFees(uint256 amount) internal view returns (uint256 lpFee, uint256 protocolFee) {
+        uint256 denom = factory.FEE_DENOMINATOR();
+        uint256 lbps  = factory.lpFeeBps();
+        uint256 pbps  = factory.protocolFeeBps();
+
+        // Ceiling division: (a * b + denom - 1) / denom
+        // When bps == 0 (fee disabled), result is 0 — the guard is defensive.
+        lpFee       = lbps > 0 ? (amount * lbps  + denom - 1) / denom : 0;
+        protocolFee = pbps > 0 ? (amount * pbps  + denom - 1) / denom : 0;
     }
 
     // ─── Deposit ──────────────────────────────────────────────────────────────
@@ -268,7 +293,7 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
         uint256 lpAmount,
         Side lpSide,
         Side receiveSide
-    ) external nonReentrant {
+    ) external nonReentrant returns (uint256 sharesReceived) {
         if (lpAmount == 0) revert ZeroAmount();
 
         uint256 sharesOut = (lpAmount * totalShares()) / totalLpSupply();
@@ -288,24 +313,27 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
             _updateBalance(receiveSide, sharesOut, false);
             _pushTokens(receiveSide, msg.sender, sharesOut);
 
+            sharesReceived = sharesOut;
+            _flushResidualIfEmpty();
             emit WithdrawnSingleSide(msg.sender, lpSide, receiveSide, lpAmount, sharesOut, 0, 0);
         } else {
             // ── Cross-side ───────────────────────────────────────────────────
+            if (swapsPaused) revert SwapsPaused();
             uint256 avail = _getBalance(receiveSide);
-            if (sharesOut > avail) revert InsufficientLiquidity(avail, sharesOut);
 
             if (resolved) {
                 // After resolution: cross-side is also free
-                actualOut = sharesOut;
+                if (sharesOut > avail) revert InsufficientLiquidity(avail, sharesOut);
+                actualOut = sharesOut;                
                 _updateBalance(receiveSide, actualOut, false);
                 _pushTokens(receiveSide, msg.sender, actualOut);
             } else {
-                // Charge swap fee on sharesOut (same fee schedule as swap())
-                lpFee = (sharesOut * factory.lpFeeBps()) / factory.FEE_DENOMINATOR();
-                protocolFee = (sharesOut * factory.protocolFeeBps()) / factory.FEE_DENOMINATOR();
+                // Ceiling division: any non-zero sharesOut pays at least 1 unit of fee
+                (lpFee, protocolFee) = _computeFees(sharesOut);
                 actualOut = sharesOut - lpFee - protocolFee;
 
-                // lpFee stays in receiveSide balance implicitly (only subtract actualOut + protocolFee)
+                // lpFee stays in receiveSide balance implicitly (only subtract actualOut + protocolFee)    
+                if (actualOut + protocolFee > avail) revert InsufficientLiquidity(avail, actualOut + protocolFee);
                 _updateBalance(receiveSide, actualOut + protocolFee, false);
                 _pushTokens(receiveSide, msg.sender, actualOut);
 
@@ -314,7 +342,8 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
                     feeCollector.recordFee(_tokenAddress(receiveSide), _tokenId(receiveSide), protocolFee);
                 }
             }
-
+            sharesReceived = actualOut;
+            _flushResidualIfEmpty();
             emit WithdrawnSingleSide(msg.sender, lpSide, receiveSide, lpAmount, actualOut, lpFee, protocolFee);
         }
     }
@@ -322,13 +351,15 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
     function withdrawBothSides(
         uint256 lpAmount,
         Side lpSide,
-        uint256 samesideAmount,
-        uint256 crosssideAmount
-    ) external nonReentrant {
+        uint256 samesideBps    // e.g. 5000 = 50% same-side, 5000 = 50% cross-side
+    ) external nonReentrant returns (uint256 samesideReceived, uint256 crosssideReceived) {
         if (lpAmount == 0) revert ZeroAmount();
+        if (samesideBps > factory.FEE_DENOMINATOR()) revert InvalidSplit();
 
         uint256 grossOut = (lpAmount * totalShares()) / totalLpSupply();
-        if (samesideAmount + crosssideAmount != grossOut) revert InvalidSplit();
+
+        uint256 samesideAmount = (grossOut * samesideBps) / factory.FEE_DENOMINATOR();
+        uint256 crosssideAmount = grossOut - samesideAmount;
 
         _lpToken(lpSide).burn(msg.sender, lpAmount);
 
@@ -341,6 +372,7 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
             if (samesideAmount > avail) revert InsufficientLiquidity(avail, samesideAmount);
             _updateBalance(sameSide, samesideAmount, false);
             _pushTokens(sameSide, msg.sender, samesideAmount);
+            samesideReceived = samesideAmount;
         }
 
         // Cross-side: fee applies
@@ -349,21 +381,22 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
         uint256 crossProtocolFee;
 
         if (crosssideAmount > 0) {
-            uint256 avail = _getBalance(crossSide);
-            if (crosssideAmount > avail) revert InsufficientLiquidity(avail, crosssideAmount);
+            if (swapsPaused) revert SwapsPaused(); 
+            uint256 avail = _getBalance(crossSide);            
 
             if (resolved) {
                 // After resolution: cross-side is also free
+                if (crosssideAmount > avail) revert InsufficientLiquidity(avail, crosssideAmount);
                 crossActualOut = crosssideAmount;
                 _updateBalance(crossSide, crossActualOut, false);
                 _pushTokens(crossSide, msg.sender, crossActualOut);
             } else {
-                // Charge swap fee on crosssideAmount (same fee schedule as swap())
-                crossLpFee       = (crosssideAmount * factory.lpFeeBps())       / factory.FEE_DENOMINATOR();
-                crossProtocolFee = (crosssideAmount * factory.protocolFeeBps()) / factory.FEE_DENOMINATOR();
-                crossActualOut   = crosssideAmount - crossLpFee - crossProtocolFee;
-
+                // Ceiling division: any non-zero crosssideAmount pays at least 1 unit of fee
+                (crossLpFee, crossProtocolFee) = _computeFees(crosssideAmount);
+                crossActualOut = crosssideAmount - crossLpFee - crossProtocolFee;
+                
                 // lpFee stays in crossSide balance implicitly (only subtract crossActualOut + crossProtocolFee)
+                if (crossActualOut + crossProtocolFee > avail) revert InsufficientLiquidity(avail, crossActualOut + crossProtocolFee);                
                 _updateBalance(crossSide, crossActualOut + crossProtocolFee, false);
                 _pushTokens(crossSide, msg.sender, crossActualOut);
 
@@ -373,8 +406,28 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
                 }
             }
         }
-
+        crosssideReceived = crossActualOut;
+        _flushResidualIfEmpty();
         emit WithdrawnBothSides(msg.sender, lpSide, lpAmount, samesideAmount, crossActualOut, crossLpFee, crossProtocolFee);
+    }
+
+    /// @dev If the last LP just exited, any residual tracked balance (orphaned LP fees)
+    ///      is flushed to the feeCollector. Prevents first-depositor capture of fee residue.
+    function _flushResidualIfEmpty() internal {
+        if (totalLpSupply() > 0) return;
+
+        if (polymarketBalance > 0) {
+            uint256 amount = polymarketBalance;
+            polymarketBalance = 0;
+            _pushTokens(Side.POLYMARKET, address(feeCollector), amount);
+            feeCollector.recordFee(factory.polymarketToken(), polymarketTokenId, amount);
+        }
+        if (opinionBalance > 0) {
+            uint256 amount = opinionBalance;
+            opinionBalance = 0;
+            _pushTokens(Side.OPINION, address(feeCollector), amount);
+            feeCollector.recordFee(factory.opinionToken(), opinionTokenId, amount);
+        }
     }
 
     // ─── Swap ─────────────────────────────────────────────────────────────────
@@ -388,35 +441,35 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
      *           Protocol fee → transferred to FeeCollector
      *
      * @param fromSide  Side being deposited
-     * @param amountIn  Number of shares deposited
+     * @param sharesIn  Number of shares deposited
      */
-    function swap(Side fromSide, uint256 amountIn) external nonReentrant returns (uint256 amountOut) {
+    function swap(Side fromSide, uint256 sharesIn) external nonReentrant returns (uint256 sharesOut) {
         if (swapsPaused) revert SwapsPaused();
-        if (amountIn == 0) revert ZeroAmount();
+        if (sharesIn == 0) revert ZeroAmount();
 
         Side toSide = _oppositeSide(fromSide);
 
-        uint256 lpFee = (amountIn * factory.lpFeeBps()) / factory.FEE_DENOMINATOR();
-        uint256 protocolFee = (amountIn * factory.protocolFeeBps()) / factory.FEE_DENOMINATOR();
-        amountOut = amountIn - lpFee - protocolFee;
+        // Ceiling division: any non-zero sharesIn pays at least 1 unit of fee
+        (uint256 lpFee, uint256 protocolFee) = _computeFees(sharesIn);
+        sharesOut = sharesIn - lpFee - protocolFee;
 
         uint256 toBalance = _getBalance(toSide);
-        if (amountOut > toBalance) revert InsufficientLiquidity(toBalance, amountOut);
+        if (sharesOut > toBalance) revert InsufficientLiquidity(toBalance, sharesOut);
 
-        _pullTokens(fromSide, msg.sender, amountIn);
+        _pullTokens(fromSide, msg.sender, sharesIn);
 
         if (protocolFee > 0) {
             _pushTokens(fromSide, address(feeCollector), protocolFee);
             feeCollector.recordFee(_tokenAddress(fromSide), _tokenId(fromSide), protocolFee);
         }
 
-        _pushTokens(toSide, msg.sender, amountOut);
+        _pushTokens(toSide, msg.sender, sharesOut);
 
-        // LP fee stays in fromSide balance (amountIn - protocolFee added, not amountIn - protocolFee - lpFee)
-        _updateBalance(fromSide, amountIn - protocolFee, true);
-        _updateBalance(toSide, amountOut, false);
+        // LP fee stays in fromSide balance (sharesIn - protocolFee added, not sharesIn - protocolFee - lpFee)
+        _updateBalance(fromSide, sharesIn - protocolFee, true);
+        _updateBalance(toSide, sharesOut, false);
 
-        emit Swapped(msg.sender, fromSide, amountIn, amountOut, lpFee, protocolFee);
+        emit Swapped(msg.sender, fromSide, sharesIn, sharesOut, lpFee, protocolFee);
     }
 
     // ─── Admin ────────────────────────────────────────────────────────────────
@@ -435,7 +488,7 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
 
     /// @notice Mark this pool as resolved. Cross-side withdrawals become fee-free.
     ///         Called by factory (owner-gated) once the underlying market settles.
-    function setResolved() external {
+    function setResolvedAndPausedDeposits() external {
         if (msg.sender != address(factory)) revert Unauthorized();
         if (resolved) revert AlreadyResolved();
         resolved = true;
@@ -448,9 +501,7 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
         if (msg.sender != address(factory)) revert Unauthorized();
         if (!resolved) revert NotResolved();
         resolved = false;
-        depositsPaused = false;
         emit Resolved(resolved);
-        emit DepositsPausedSet(depositsPaused);
     }
 
 
