@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
@@ -300,7 +300,7 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
         uint256 totalBps = lpFeeBps + protocolFeeBps;
         if (totalBps == 0) return (0, 0);
 
-        // Single ceiling rounding on the combined fee — one rounding event, not two
+        // Single ceiling rounding on the combined fee — one rounding event
         uint256 totalFee = (normAmount * totalBps + FEE_DENOMINATOR - 1) / FEE_DENOMINATOR;
 
         // Split proportionally: protocolFee gets floor, lpFee absorbs the remainder
