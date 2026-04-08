@@ -16,16 +16,18 @@ YES shares for the same event on two platforms should cost exactly the same. In 
 4. **Liquidity** — LPs deposit single-sided. LP tokens accrue fees automatically — no claiming needed.
 
 ```
-Chain A                                Chain B
-──────────────────────────────────────────────────────────
-Market A ERC-1155                      Market B ERC-1155
-     │                                        │
- Escrow ──────── LayerZero V2 ──────► BridgeReceiver
-     │                                        │
-     └──────────── WrappedToken ──────────────┘
-                         │
-                     SwapPool
-                   (1:1 AMM)
+Source Chain                          Destination Chain
+──────────────────────────────────────────────────────
+Market A ERC-1155                     Market B ERC-1155
+     │                                      (native)
+  Escrow                                       │
+     │                                         │
+     └──── LayerZero V2 ────► BridgeReceiver   │
+                                     │         │
+                               WrappedToken    │
+                                     │         │
+                                     └── SwapPool ──┘
+                                        (1:1 AMM)
 ```
 
 Same-chain markets skip the bridge entirely — `SwapPool` works with any two ERC-1155 contracts on the same chain.
