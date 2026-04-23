@@ -1,0 +1,30 @@
+{
+  "title": "PredictSwap v3 Architecture",
+  "nodes": [
+    {"id": "user", "label": "User / LP", "subtitle": "Permissionless", "type": "actor", "row": 0},
+    {"id": "operator", "label": "Operator", "subtitle": "Bounded Role", "type": "actor", "row": 0},
+    {"id": "owner", "label": "Owner", "subtitle": "Trusted Admin", "type": "actor", "row": 0},
+    {"id": "pool_factory", "label": "PoolFactory", "subtitle": "Registry + Deployer", "type": "protocol", "row": 1},
+    {"id": "swap_pool", "label": "SwapPool", "subtitle": "Core Pool", "type": "protocol", "row": 2},
+    {"id": "lp_token", "label": "LPToken", "subtitle": "A-side / B-side", "type": "protocol", "row": 2},
+    {"id": "fee_collector", "label": "FeeCollector", "subtitle": "Fee Accumulator", "type": "protocol", "row": 2},
+    {"id": "market_tokens", "label": "Market ERC-1155", "subtitle": "Polymarket / Opinion", "type": "external", "row": 3}
+  ],
+  "edges": [
+    {"from": "user", "to": "swap_pool", "label": "deposit / swap / withdraw"},
+    {"from": "operator", "to": "pool_factory", "label": "create / pause / resolve"},
+    {"from": "owner", "to": "pool_factory", "label": "setFees / rescue"},
+    {"from": "owner", "to": "fee_collector", "label": "withdraw fees"},
+    {"from": "pool_factory", "to": "swap_pool", "label": "initialize / admin"},
+    {"from": "pool_factory", "to": "lp_token", "label": "registerPool"},
+    {"from": "swap_pool", "to": "lp_token", "label": "mint / burn LP"},
+    {"from": "swap_pool", "to": "fee_collector", "label": "push protocol fee"},
+    {"from": "swap_pool", "to": "market_tokens", "label": "pull / push shares"},
+    {"from": "fee_collector", "to": "market_tokens", "label": "transfer on withdraw"}
+  ],
+  "groups": [
+    {"label": "Actors", "nodes": ["user", "operator", "owner"]},
+    {"label": "PredictSwap v3", "nodes": ["pool_factory", "swap_pool", "lp_token", "fee_collector"]},
+    {"label": "External", "nodes": ["market_tokens"]}
+  ]
+}
