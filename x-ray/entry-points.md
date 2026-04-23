@@ -4,242 +4,233 @@
 
 ## Protocol Flow Paths
 
-### Path 1: Deposit -> Earn Fees -> Withdraw (Happy Path)
+### Path 1: Deposit
 
-1. User approves SwapPool on the ERC-1155 market contract
-2. User calls `SwapPool.deposit(side, amount)` -- pool pulls ERC-1155 shares, mints LP tokens via LPToken, updates sideValue
-3. Other users swap via `SwapPool.swap()` -- LP fees accrue to the drained side's sideValue, increasing LP rate
-4. After 24h (JIT lock matures), user calls `SwapPool.withdrawal(sameSide, lpAmount, lpSide)` -- no JIT fee, burns LP, pushes shares
+```
+User -> SwapPool.deposit(side, amount)
+  -> _pullTokens(side, user, amount)           [ERC-1155 safeTransferFrom]
+  -> _toNorm(side, amount)                      [normalize to 18-dec]
+  -> _lpToken(side).totalSupply(_lpTokenId)     [read LP supply via factory]
+  -> _addSideValue(side, normAmount)            [increase aSideValue or bSideValue]
+  -> _mintLp(side, user, lpMinted)              [factory.marketXLpToken().mint()]
+    -> LPToken.mint(to, tokenId, amount)
+      -> totalSupply[tokenId] += amount
+      -> _mint(to, tokenId, amount, "")
+        -> _update() hook: inflow branch grows fresh bucket
+```
 
-### Path 2: Deposit -> Market Resolution -> WithdrawProRata
+### Path 2: Swap
 
-1. User deposits as above
-2. Operator calls `PoolFactory.resolvePoolAndPause(poolId)` -- atomically sets resolved=true, depositsPaused=true, swapsPaused=true
-3. User calls `SwapPool.withdrawProRata(lpAmount, lpSide)` -- proportional split of native + cross tokens, no fees
+```
+User -> SwapPool.swap(fromSide, sharesIn)
+  -> _toNorm(fromSide, sharesIn)                [normalize]
+  -> _computeFees(normIn)                       [ceiling-rounded total fee, split LP/protocol]
+  -> physicalBalanceNorm(toSide)                [check output liquidity]
+  -> _pullTokens(fromSide, user, sharesIn)      [ERC-1155 in]
+  -> _fromNorm(fromSide, protocolFee)           [denormalize protocol fee]
+  -> _pushTokens(fromSide, feeCollector, raw)   [protocol fee to FeeCollector]
+  -> feeCollector.recordFee(...)                [event only]
+  -> _fromNorm(toSide, normOut)                 [denormalize output]
+  -> _pushTokens(toSide, user, rawOut)          [ERC-1155 out]
+  -> _addSideValue(toSide, lpFee)              [LP fee accrues to drained side]
+```
 
-### Path 3: Swap
+### Path 3: Withdrawal (swaps active)
 
-1. User approves SwapPool on fromSide ERC-1155 contract
-2. User calls `SwapPool.swap(fromSide, sharesIn)` -- pool pulls fromSide shares, computes fees, checks output liquidity, pushes toSide shares
-3. LP fee accrues to drained (toSide) sideValue; protocol fee pushed to FeeCollector
+```
+User -> SwapPool.withdrawal(receiveSide, lpAmount, lpSide)
+  -> _lpToShares(lpSide, lpAmount)              [convert LP to normalized value]
+  -> _freshConsumedForBurn(lpSide, lpAmount)    [query LPToken.lockedAmount]
+  -> _computeFees(feeBase)                      [JIT fee or cross-side fee]
+  -> physicalBalanceNorm(receiveSide)            [check liquidity]
+  -> _subSideValue / _addSideValue              [update value accounting]
+  -> _burnLp(lpSide, user, lpAmount)
+    -> LPToken.burn(from, tokenId, amount)
+      -> totalSupply[tokenId] -= amount
+      -> _burn(from, tokenId, amount)
+        -> _update() hook: outflow branch consumes matured first
+  -> _fromNorm(receiveSide, payout)             [denormalize]
+  -> _pushTokens(receiveSide, user, rawPayout)  [ERC-1155 out]
+  -> _pushTokens(receiveSide, feeCollector, rawProto)  [protocol fee if any]
+  -> _flushResidualIfEmpty()                    [sweep dust if all LP burned]
+```
 
-### Path 4: Pool Lifecycle (Admin)
+### Path 4: Withdrawal Pro-Rata (swaps paused)
 
-1. Owner deploys PoolFactory with market contracts, fee collector, operator, names
-2. Operator calls `PoolFactory.createPool(marketA, marketB, lpFee, protocolFee, desc)` -- deploys SwapPool, registers LP tokenIds, calls initialize
-3. During operation: operator pauses/unpauses/resolves as needed
-4. Owner adjusts fees via `setPoolFees`, rescues stuck tokens via rescue functions
-5. Owner withdraws accumulated fees from FeeCollector
+```
+User -> SwapPool.withdrawProRata(lpAmount, lpSide)
+  -> _lpToShares(lpSide, lpAmount)              [convert LP to normalized value]
+  -> physicalBalanceNorm(nativeSide)             [read native physical]
+  -> proportional split: nativeShare = (lpAmount * availableNative) / totalSupply
+  -> cap nativeShare at shares; remainder = crossShare
+  -> _subSideValue(lpSide, shares)
+  -> _burnLp(lpSide, user, lpAmount)
+  -> _pushTokens(nativeSide, user, rawNative)   [native portion]
+  -> _pushTokens(crossSide, user, rawCross)     [cross portion if any]
+  -> _flushResidualIfEmpty()
+```
+
+### Path 5: Pool Creation
+
+```
+Operator -> PoolFactory.createPool(marketA, marketB, fees, description)
+  -> validate tokenId uniqueness (usedMarketATokenId, usedMarketBTokenId)
+  -> new SwapPool(factory, marketA, marketB, fees, feeCollector)
+  -> marketALpToken.registerPool(pool, lpIdA)   [one-shot assignment]
+  -> marketBLpToken.registerPool(pool, lpIdB)
+  -> pool.initialize(lpIdA, lpIdB)              [one-time wiring]
+  -> pools.push(PoolInfo{...})
+```
 
 ---
 
-## Permissionless Entry Points
+## Permissionless (User)
 
-### SwapPool.deposit
+All functions: `nonReentrant`, `whenInitialized`.
 
-```
-function deposit(Side side, uint256 amount) external nonReentrant whenInitialized returns (uint256 lpMinted)
-```
+### `SwapPool.deposit(Side side, uint256 amount)`
 
-**File:** SwapPool.sol L252-277
+- **Guards:** `!depositsPaused`, `!resolved`, `amount > 0`
+- **Value flow:** IN (ERC-1155 shares from user to pool)
+- **State writes:** `aSideValue` or `bSideValue` += normAmount; LPToken totalSupply += lpMinted; fresh bucket updated
+- **Revert conditions:** DepositsPaused, MarketResolved, ZeroAmount, DepositTooSmall (lpMinted==0), ERC-1155 transfer failure
 
-**Guards:**
-- `nonReentrant` -- reentrancy lock
-- `whenInitialized` -- reverts NotInitialized if pool not yet wired
-- `depositsPaused` -- reverts DepositsPaused
-- `resolved` -- reverts MarketResolved
-- `amount == 0` -- reverts ZeroAmount
-- `lpMinted == 0` -- reverts DepositTooSmall (rounding to zero)
+### `SwapPool.swap(Side fromSide, uint256 sharesIn)`
 
-**Value flow:** IN. User sends ERC-1155 shares to pool; pool mints LP tokens to user.
+- **Guards:** `!swapsPaused`, `!resolved`, `sharesIn > 0`
+- **Value flow:** IN (fromSide shares) + OUT (toSide shares + protocol fee to FeeCollector)
+- **State writes:** sideValue of toSide += lpFee (no sideValue decrease -- physical composition shifts)
+- **Revert conditions:** SwapsPaused, MarketResolved, ZeroAmount, InsufficientLiquidity, SwapTooSmall (rawOut==0)
 
-**State changes:**
-- aSideValue or bSideValue += normAmount
-- LPToken.totalSupply[tokenId] += lpMinted
-- LPToken.freshDeposit[user][tokenId] updated (JIT lock starts)
-- ERC-1155 balance: user -= amount, pool += amount
+### `SwapPool.withdrawal(Side receiveSide, uint256 lpAmount, Side lpSide)`
 
-**Preconditions:**
-- User must have approved SwapPool on the relevant ERC-1155 market contract
-- Pool must be initialized, deposits not paused, not resolved
+- **Guards:** `!swapsPaused`, `lpAmount > 0`
+- **Value flow:** OUT (shares to user + protocol fee to FeeCollector)
+- **State writes:** sideValue decreased; LP burned; fresh bucket consumed; flush residual if empty
+- **Revert conditions:** SwapsPaused, ZeroAmount, InsufficientLiquidity, ZeroAmount (rawPayout==0)
+- **Fee logic:** Same-side = JIT fee on fresh portion only; cross-side = full fee. No fee when resolved.
 
-**Downstream calls:**
-- `IERC1155.safeTransferFrom` (pull shares from user)
-- `LPToken.mint` (mint LP to user, triggers _update with JIT bucket logic)
+### `SwapPool.withdrawProRata(uint256 lpAmount, Side lpSide)`
 
-**Key math:**
-- First deposit: `lpMinted = normAmount`
-- Subsequent: `lpMinted = (normAmount * supply) / sideValue`
+- **Guards:** `swapsPaused` (required), `lpAmount > 0`
+- **Value flow:** OUT (proportional native + cross shares to user)
+- **State writes:** sideValue decreased; LP burned; flush residual if empty
+- **Revert conditions:** SwapsNotPaused, ZeroAmount, InsufficientLiquidity (cross-side), ZeroAmount (both outputs zero)
 
----
+### `FeeCollector.recordFee(address token, uint256 tokenId, uint256 amount)`
 
-### SwapPool.swap
-
-```
-function swap(Side fromSide, uint256 sharesIn) external nonReentrant whenInitialized returns (uint256 sharesOut)
-```
-
-**File:** SwapPool.sol L284-324
-
-**Guards:**
-- `nonReentrant`
-- `whenInitialized`
-- `swapsPaused` -- reverts SwapsPaused
-- `resolved` -- reverts MarketResolved
-- `sharesIn == 0` -- reverts ZeroAmount
-- `normOut > availableOut` -- reverts InsufficientLiquidity
-- `rawOut == 0` -- reverts SwapTooSmall
-
-**Value flow:** IN + OUT. User sends fromSide shares, receives toSide shares minus fees.
-
-**State changes:**
-- toSide sideValue += lpFee (LP fee accrues to drained side)
-- ERC-1155: user sends fromSide, receives toSide
-- FeeCollector receives protocolFee in fromSide tokens (if rawProtocol > 0)
-
-**Preconditions:**
-- User must have approved SwapPool on fromSide ERC-1155 contract
-- Pool must have sufficient toSide physical liquidity
-- Pool not paused, not resolved
-
-**Downstream calls:**
-- `IERC1155.safeTransferFrom` (pull fromSide, push toSide, push protocol fee)
-- `FeeCollector.recordFee` (if rawProtocol > 0)
-
-**Key math:**
-- `normOut = normIn - lpFee - protocolFee`
-- Fees: `totalFee = (normIn * totalBps + FEE_DENOMINATOR - 1) / FEE_DENOMINATOR` (rounds up)
-- `protocolFee = (totalFee * protocolFeeBps) / totalBps`
-- `lpFee = totalFee - protocolFee`
+- **Guards:** `amount > 0`
+- **Value flow:** None (event only)
+- **State writes:** None
+- **Note:** Fully permissionless. Emits `FeeReceived` with `msg.sender` as pool address. Off-chain consumers must filter.
 
 ---
 
-### SwapPool.withdrawal
+## Operator (+ Owner)
 
-```
-function withdrawal(Side receiveSide, uint256 lpAmount, Side lpSide) external nonReentrant whenInitialized returns (uint256 received)
-```
+All gated by `onlyOperator` modifier: `msg.sender == operator || msg.sender == owner()`.
 
-**File:** SwapPool.sol L337-409
+### `PoolFactory.createPool(MarketConfig, MarketConfig, uint256, uint256, string)`
 
-**Guards:**
-- `nonReentrant`
-- `whenInitialized`
-- `swapsPaused` -- reverts SwapsPaused (must use withdrawProRata when paused)
-- `lpAmount == 0` -- reverts ZeroAmount
-- `totalOutflow > available` -- reverts InsufficientLiquidity
-- `rawPayout == 0` -- reverts ZeroAmount (line 396)
+- **Effect:** Deploys new SwapPool, registers LP tokenIds, initializes pool
+- **Guards:** tokenId != 0, decimals <= 18, unique tokenId per side, unique pair key
+- **Downstream:** Calls `SwapPool.initialize()`, `LPToken.registerPool()` (both one-shot)
 
-**Value flow:** OUT. User burns LP tokens, receives ERC-1155 shares.
+### `PoolFactory.setPoolDepositsPaused(uint256 poolId, bool paused_)`
 
-**State changes:**
-- sideValue updated (complex: depends on same-side/cross-side, last-LP, JIT fee)
-- LPToken.totalSupply[tokenId] -= lpAmount
-- LPToken.freshDeposit[user][tokenId] updated (outflow consumes matured first)
-- ERC-1155: pool sends payout + protocol fee out
-- If all LP burned: _flushResidualIfEmpty sends dust to FeeCollector
+- **Effect:** Sets `SwapPool.depositsPaused`
+- **Guards:** valid poolId
 
-**Fee logic:**
-- **Same-side, not resolved:** JIT fee on fresh portion only. `feeBase = (shares * freshBurned) / lpAmount`
-- **Cross-side, not resolved:** full fee on entire claim
-- **Resolved (either side):** no fee
-- **Last-LP same-side with fee:** lpFee credited to opposite side (value accounting issue, see x-ray 4.1)
+### `PoolFactory.setPoolSwapsPaused(uint256 poolId, bool paused_)`
 
-**Preconditions:**
-- User must hold lpAmount of LP tokens for lpSide
-- Pool must have sufficient physical tokens on receiveSide
-- Swaps must not be paused
+- **Effect:** Sets `SwapPool.swapsPaused`
+- **Guards:** valid poolId
 
-**Downstream calls:**
-- `LPToken.burn`, `IERC1155.safeTransferFrom`, `FeeCollector.recordFee`
+### `PoolFactory.setResolvePool(uint256 poolId, bool resolved_)`
+
+- **Effect:** Sets `SwapPool.resolved`
+- **Guards:** valid poolId
+
+### `PoolFactory.resolvePoolAndPause(uint256 poolId)`
+
+- **Effect:** Sets resolved=true, depositsPaused=true, swapsPaused=true in one call
+- **Guards:** valid poolId
 
 ---
 
-### SwapPool.withdrawProRata
+## Owner Only
 
-```
-function withdrawProRata(uint256 lpAmount, Side lpSide) external nonReentrant whenInitialized returns (uint256 nativeOut, uint256 crossOut)
-```
+All gated by OZ `onlyOwner`.
 
-**File:** SwapPool.sol L422-471
+### `PoolFactory.setOperator(address operator_)`
 
-**Guards:**
-- `nonReentrant`
-- `whenInitialized`
-- `!swapsPaused` -- reverts SwapsNotPaused (only available when paused)
-- `lpAmount == 0` -- reverts ZeroAmount
-- `crossShare > availableCross` -- reverts InsufficientLiquidity
-- `rawNative == 0 && rawCross == 0` -- reverts ZeroAmount
+- **Effect:** Changes operator address
+- **Guards:** operator_ != address(0)
 
-**Value flow:** OUT. User burns LP, receives proportional native + cross tokens. No fees.
+### `PoolFactory.setFeeCollector(address feeCollector_)`
 
-**State changes:**
-- sideValue -= shares
-- LPToken supply decremented
-- ERC-1155 tokens transferred to user
-- If all LP burned: _flushResidualIfEmpty
+- **Effect:** Updates factory-level feeCollector
+- **Note:** Does NOT propagate to existing pools (SwapPool.feeCollector is immutable)
 
-**Key math:**
-- `nativeShare = (lpAmount * availableNative) / totalSupply`, capped at shares
-- `crossShare = shares - nativeShare`
+### `PoolFactory.setPoolFees(uint256 poolId, uint256 lpFeeBps_, uint256 protocolFeeBps_)`
 
-**Preconditions:**
-- Swaps must be paused (operator has paused or resolved-and-paused)
-- User holds LP tokens
+- **Effect:** Updates fee configuration on a specific pool
+- **Guards:** lpFeeBps_ <= 100 (1%), protocolFeeBps_ <= 50 (0.5%)
 
-**Downstream calls:**
-- `LPToken.burn`, `IERC1155.safeTransferFrom`
+### `PoolFactory.rescuePoolTokens(uint256 poolId, Side, uint256, address)`
 
----
+- **Effect:** Rescues surplus pool tokens (global surplus check)
+- **Note:** Uses global surplus = totalPhysical(A+B) - totalTracked. Can drain from either side.
 
-### FeeCollector.recordFee
+### `PoolFactory.rescuePoolERC1155(uint256 poolId, address, uint256, uint256, address)`
 
-```
-function recordFee(address token, uint256 tokenId, uint256 amount) external
-```
+- **Effect:** Rescues non-pool ERC-1155 tokens accidentally sent to the pool
+- **Guards:** contractAddress != marketA and != marketB
 
-**File:** FeeCollector.sol L33-36
+### `PoolFactory.rescuePoolERC20(uint256 poolId, address, uint256, address)`
 
-**Guards:**
-- `amount == 0` -- reverts ZeroAmount
+- **Effect:** Rescues ERC-20 tokens accidentally sent to the pool
 
-**Value flow:** None (event-only).
+### `PoolFactory.rescuePoolETH(uint256 poolId, address payable)`
 
-**Note:** Permissionless. Anyone can emit spoofed FeeReceived events. Off-chain indexers must filter by known pool addresses.
+- **Effect:** Rescues ETH sent to the pool
 
----
+### `FeeCollector.withdraw(address, uint256, uint256, address)`
 
-## Operator-Gated Entry Points (onlyOperator = operator OR owner)
+- **Effect:** Withdraws specific amount of a specific tokenId
 
-| Function | File | Key Guards | Effect |
-|---|---|---|---|
-| `createPool(marketA, marketB, lpFee, protocolFee, desc)` | PoolFactory L192-248 | onlyOperator, tokenId!=0, decimals<=18, no duplicate key, no reused tokenId | Deploys SwapPool, registers LP positions, initializes pool |
-| `setPoolDepositsPaused(poolId, paused)` | PoolFactory L296-299 | onlyOperator, poolId valid | Sets depositsPaused on target pool |
-| `setPoolSwapsPaused(poolId, paused)` | PoolFactory L301-305 | onlyOperator, poolId valid | Sets swapsPaused on target pool |
-| `setResolvePool(poolId, resolved)` | PoolFactory L308-312 | onlyOperator, poolId valid | Sets resolved flag (can un-resolve) |
-| `resolvePoolAndPause(poolId)` | PoolFactory L316-322 | onlyOperator, poolId valid | Atomic: resolved=true, depositsPaused=true, swapsPaused=true |
+### `FeeCollector.withdrawBatch(address, uint256[], uint256[], address)`
+
+- **Effect:** Batch withdrawal with caller-specified amounts
+
+### `FeeCollector.withdrawAll(address, uint256, address)`
+
+- **Effect:** Withdraws entire balance of a single tokenId
+
+### `FeeCollector.withdrawAllBatch(address, uint256[], address)`
+
+- **Effect:** Withdraws entire balances of multiple tokenIds, skipping zeros
 
 ---
 
-## Owner-Only Entry Points (onlyOwner)
+## Internal-Only (no external access)
 
-### PoolFactory Owner Functions
+### `SwapPool.initialize(uint256, uint256)`
 
-| Function | File | Key Guards | Effect |
-|---|---|---|---|
-| `setOperator(addr)` | PoolFactory L277-281 | onlyOwner, addr!=0 | Changes operator address |
-| `setFeeCollector(addr)` | PoolFactory L283-287 | onlyOwner, addr!=0 | Changes feeCollector for NEW pools only |
-| `setPoolFees(poolId, lpFee, protocolFee)` | PoolFactory L289-292 | onlyOwner, poolId valid | Relays setFees to pool (hard caps: lp<=100bps, proto<=50bps) |
-| `rescuePoolTokens(poolId, side, amount, to)` | PoolFactory L326-331 | onlyOwner, poolId valid | Rescues surplus pool tokens (global surplus check) |
-| `rescuePoolERC1155(poolId, contract, tokenId, amount, to)` | PoolFactory L333-338 | onlyOwner, rejects pool market contracts | Rescues non-pool ERC-1155 tokens |
-| `rescuePoolERC20(poolId, token, amount, to)` | PoolFactory L340-344 | onlyOwner | Rescues ERC-20 tokens from pool |
-| `rescuePoolETH(poolId, to)` | PoolFactory L347-350 | onlyOwner | Rescues ETH from pool |
+- **Caller:** PoolFactory only (`msg.sender == address(factory)`)
+- **One-shot:** reverts on `AlreadyInitialized`
+- **Effect:** Sets `marketALpTokenId`, `marketBLpTokenId`, `_initialized = true`
 
-### FeeCollector Owner Functions
+### `SwapPool.setDepositsPaused / setSwapsPaused / setResolved / setResolvedAndPaused / setFees`
 
-| Function | File | Key Guards | Effect |
-|---|---|---|---|
-| `withdraw(token, tokenId, amount, to)` | FeeCollector L40-45 | onlyOwner, to!=0, amount!=0 | Withdraws specific amount of specific tokenId |
-| `withdrawBatch(token, tokenIds, amounts, to)` | FeeCollector L47-59 | onlyOwner, to!=0, all amounts!=0 | Batch withdraw multiple tokenIds |
-| `withdrawAll(token, tokenId, to)` | FeeCollector L62-68 | onlyOwner, to!=0, balance!=0 | Withdraws entire balance of a tokenId |
-| `withdrawAllBatch(token, tokenIds, to)` | FeeCollector L72-96 | onlyOwner, to!=0, at least one balance>0 | Batch withdraw entire balances, skips zeros |
+- **Caller:** PoolFactory only
+- **Effect:** Admin state changes on the pool
+
+### `LPToken.registerPool(address, uint256)`
+
+- **Caller:** Factory only
+- **One-shot per tokenId:** reverts on `TokenIdAlreadyRegistered`
+
+### `LPToken.mint / LPToken.burn`
+
+- **Caller:** Registered pool for that tokenId only (`onlyPool(tokenId)`)

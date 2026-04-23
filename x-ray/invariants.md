@@ -1,183 +1,120 @@
-# Invariants & Guards -- PredictSwap v3
+# Invariants -- PredictSwap v3
 
 ---
 
-## Guards (G-N)
+## Global Invariants
 
-Guards are explicit revert conditions in the source code.
+#### G-1: Pool solvency
+totalPhysical(A) + totalPhysical(B) >= aSideValue + bSideValue, always. The pool never owes more than it holds.
 
-#### G-1 SwapPool: DepositsPaused
+#### G-2: Value conservation across operations
+For every deposit/swap/withdrawal, the change in (aSideValue + bSideValue) plus fees extracted equals the change in total physical balance, within rounding tolerance of 1 unit per operation per low-decimal side.
 
-`depositsPaused == true` reverts `DepositsPaused()` -- SwapPool.sol L258 -- prevents deposits when operator has paused.
+#### G-3: Fee bounds
+lpFeeBps <= MAX_LP_FEE (100) AND protocolFeeBps <= MAX_PROTOCOL_FEE (50), enforced at construction and by setFees. Total fee never exceeds 1.5%.
 
-#### G-2 SwapPool: MarketResolved (deposit)
+#### G-4: LP rate monotonicity (non-decreasing)
+marketARate() and marketBRate() never decrease from swap fees. Rates start at 1e18 and grow as LP fees accrue to sideValue.
 
-`resolved == true` reverts `MarketResolved()` -- SwapPool.sol L259 -- prevents deposits after market resolution.
+#### G-5: Admin gating
+All SwapPool state-changing admin functions revert unless msg.sender == address(factory). PoolFactory operator functions revert unless msg.sender == operator OR msg.sender == owner().
 
-#### G-3 SwapPool: SwapsPaused
-
-`swapsPaused == true` reverts `SwapsPaused()` -- SwapPool.sol L290 (swap), L343 (withdrawal) -- blocks swaps and active-mode withdrawals when paused.
-
-#### G-4 SwapPool: MarketResolved (swap)
-
-`resolved == true` reverts `MarketResolved()` -- SwapPool.sol L291 -- prevents swaps after resolution.
-
-#### G-5 SwapPool: ZeroAmount
-
-`amount == 0` reverts `ZeroAmount()` -- SwapPool.sol L260 (deposit), L292 (swap), L344 (withdrawal), L429 (withdrawProRata) -- rejects zero-value operations.
-
-#### G-6 SwapPool: DepositTooSmall
-
-`lpMinted == 0` reverts `DepositTooSmall()` -- SwapPool.sol L271 -- prevents rounding-to-zero deposits that would grant no LP tokens.
-
-#### G-7 SwapPool: SwapTooSmall
-
-`rawOut == 0` reverts `SwapTooSmall()` -- SwapPool.sol L316 -- prevents swaps where output rounds to zero after fees.
-
-#### G-8 SwapPool: InsufficientLiquidity (swap)
-
-`normOut > availableOut` reverts `InsufficientLiquidity(available, required)` -- SwapPool.sol L302 -- prevents swaps exceeding physical output-side balance.
-
-#### G-9 SwapPool: InsufficientLiquidity (withdrawal)
-
-`totalOutflow > available` reverts `InsufficientLiquidity(available, totalOutflow)` -- SwapPool.sol L371 -- prevents withdrawals exceeding physical receive-side balance (payout + protocolFee).
-
-#### G-10 SwapPool: InsufficientLiquidity (withdrawProRata cross)
-
-`crossShare > availableCross` reverts `InsufficientLiquidity(availableCross, crossShare)` -- SwapPool.sol L448 -- prevents pro-rata cross portion exceeding physical balance.
-
-#### G-11 SwapPool: rawPayout == 0 (withdrawal)
-
-`rawPayout == 0` reverts `ZeroAmount()` -- SwapPool.sol L396 -- prevents withdrawal where payout rounds to zero after fees and normalization.
-
-#### G-12 SwapPool: FeeTooHigh (constructor)
-
-`lpFeeBps_ > MAX_LP_FEE` or `protocolFeeBps_ > MAX_PROTOCOL_FEE` reverts `FeeTooHigh()` -- SwapPool.sol L176-177 -- enforces hard caps at construction.
-
-#### G-13 SwapPool: FeeTooHigh (setFees)
-
-`lpFeeBps_ > MAX_LP_FEE` or `protocolFeeBps_ > MAX_PROTOCOL_FEE` reverts `FeeTooHigh()` -- SwapPool.sol L531-532 -- enforces hard caps on fee updates.
-
-#### G-14 SwapPool: Unauthorized
-
-`msg.sender != address(factory)` reverts `Unauthorized()` -- SwapPool.sol L195, L502, L508, L514, L519, L530, L542, L561, L571, L578 -- all admin functions gated to factory only.
-
-#### G-15 SwapPool: AlreadyInitialized
-
-`_initialized == true` reverts `AlreadyInitialized()` -- SwapPool.sol L196 -- one-shot initialization.
-
-#### G-16 SwapPool: NotInitialized
-
-`_initialized == false` reverts `NotInitialized()` -- SwapPool.sol L205 -- blocks user operations before initialization.
-
-#### G-17 SwapPool: SwapsNotPaused
-
-`swapsPaused == false` reverts `SwapsNotPaused()` -- SwapPool.sol L428 -- withdrawProRata only available when swaps are paused.
-
-#### G-18 LPToken: OnlyPool
-
-`msg.sender != pool[tokenId]` reverts `OnlyPool()` -- LPToken.sol L84 -- restricts mint/burn to registered pool for that tokenId.
-
-#### G-19 LPToken: OnlyFactory
-
-`msg.sender != factory` reverts `OnlyFactory()` -- LPToken.sol L98 -- restricts registerPool to factory.
-
-#### G-20 LPToken: TokenIdAlreadyRegistered
-
-`pool[tokenId] != address(0)` reverts `TokenIdAlreadyRegistered()` -- LPToken.sol L101 -- one-shot registration per tokenId.
-
-#### G-21 PoolFactory: NotOperator
-
-`msg.sender != operator && msg.sender != owner()` reverts `NotOperator()` -- PoolFactory.sol L139 -- gates operator-level functions.
-
-#### G-22 PoolFactory: PoolAlreadyExists
-
-`poolIndex[key] != 0` reverts `PoolAlreadyExists(key)` -- PoolFactory.sol L203 -- prevents duplicate tokenId-pair pools.
-
-#### G-23 PoolFactory: MarketATokenIdAlreadyUsed
-
-`usedMarketATokenId[tokenId] == true` reverts `MarketATokenIdAlreadyUsed(tokenId)` -- PoolFactory.sol L204 -- enforces non-reuse of market A tokenIds across all pools.
-
-#### G-24 PoolFactory: MarketBTokenIdAlreadyUsed
-
-`usedMarketBTokenId[tokenId] == true` reverts `MarketBTokenIdAlreadyUsed(tokenId)` -- PoolFactory.sol L205 -- enforces non-reuse of market B tokenIds across all pools.
-
-#### G-25 FeeCollector: ZeroAmount
-
-`amount == 0` reverts `ZeroAmount()` -- FeeCollector.sol L34 (recordFee), L42 (withdraw), L55 (withdrawBatch), L65 (withdrawAll), L80 (withdrawAllBatch) -- rejects zero-value operations.
-
-#### G-26 FeeCollector: ZeroAddress
-
-`to == address(0)` reverts `ZeroAddress()` -- FeeCollector.sol L41 (withdraw), L53 (withdrawBatch), L63 (withdrawAll), L73 (withdrawAllBatch) -- prevents transfers to zero address.
+#### G-6: Fee collector receives all protocol fees
+Every protocol fee computed by _computeFees is transferred to feeCollector via _pushTokens, followed by recordFee. No protocol fee is silently absorbed (except when _fromNorm truncates to 0 on low-decimal tokens).
 
 ---
 
-## Intra-Contract Invariants (I-N)
+## Inter-Contract Invariants
 
-#### I-1 Conservation: aSideValue + bSideValue approximates physicalBalanceNorm(A) + physicalBalanceNorm(B)
+#### I-1: LP supply tracks minted minus burned
 
-`aSideValue + bSideValue <= physicalBalanceNorm(MARKET_A) + physicalBalanceNorm(MARKET_B)` -- SwapPool.sol L81-86 (value tracking), L230-233 (physical balance) -- ensures total tracked obligations never exceed total physical tokens held. The inequality allows for rounding dust and surplus from external sends. **Derivation:** deposit adds normAmount to sideValue and pulls normAmount physical; swap redistributes value without changing total; withdrawal subtracts from sideValue and pushes physical; protocolFee push reduces physical without reducing sideValue (only lpFee stays). Strict equality breaks due to _fromNorm truncation and external token sends.
+For each side S and tokenId T:
+`LPToken.totalSupply(T) == sum_of_all_mints(T) - sum_of_all_burns(T)`
 
-#### I-2 Bound: lpFeeBps in [0, MAX_LP_FEE]
+**Derivation:** `LPToken.mint` increments `totalSupply[tokenId]` then calls `_mint`. `LPToken.burn` decrements `totalSupply[tokenId]` then calls `_burn`. Both are `onlyPool(tokenId)` gated. No other path modifies `totalSupply`. The pool calls mint in `deposit` and burn in `withdrawal`/`withdrawProRata`. OZ ERC-1155 `_mint`/`_burn` enforce balance consistency internally.
 
-`0 <= lpFeeBps <= 100` -- SwapPool.sol L176 (constructor), L531 (setFees) -- hard cap at 1.00%. **Derivation:** constructor reverts on lpFeeBps_ > 100; setFees (only callable by factory, which is only callable by owner) also reverts on > 100. No other write path to lpFeeBps.
+#### I-2: Side value tracks deposits minus withdrawals plus LP fees
 
-#### I-3 Bound: protocolFeeBps in [0, MAX_PROTOCOL_FEE]
+For each side S:
+`sideValue(S) == sum_deposits(S) + sum_lpFees_credited(S) - sum_withdrawals(S)`
+(all in normalized 18-dec units)
 
-`0 <= protocolFeeBps <= 50` -- SwapPool.sol L177 (constructor), L532 (setFees) -- hard cap at 0.50%. **Derivation:** same enforcement as I-2 for protocolFeeBps.
+**Derivation:** `_addSideValue(S, normAmount)` is called in `deposit` (for deposit amount) and in `swap`/`withdrawal` (for LP fee credited to the drained/opposite side). `_subSideValue(S, shares)` is called in `withdrawal`/`withdrawProRata` (for the LP's claim). No other path modifies `aSideValue`/`bSideValue` except `_flushResidualIfEmpty` which zeros both when all LP is burned.
 
-#### I-4 Ratio: LP minting proportional to sideValue
+**Caveat (attack surface 2.1):** In last-LP same-side withdrawal, `_addSideValue(oppositeSide, lpFee)` credits a fee to a side that did not receive corresponding physical tokens -- the fee remains physically on the withdrawing side. This inflates opposite side's tracked value relative to its physical.
 
-`lpMinted = normAmount * supply / sideValue` (subsequent deposits) or `lpMinted = normAmount` (first deposit) -- SwapPool.sol L268-270. **Derivation:** maintains pro-rata LP share. First deposit sets 1:1 baseline. Subsequent deposits scale by current rate. Reverts if lpMinted == 0 (G-6).
+**Caveat (attack surface 2.2):** In cross-side withdrawal, `_addSideValue(receiveSide, lpFee)` credits LP fee to receive side, but the fee is deducted from the payout (receive-side physical decreases). Net physical change on receiveSide = -(shares - lpFee) but tracked change = +lpFee. Global sum is conserved but per-side diverges.
 
-#### I-5 Ratio: shares = lpAmount * rate / 1e18
+#### I-3: Fresh bucket amount <= user balance
 
-`shares = (lpAmount * rate) / RATE_PRECISION` where `rate = sideValue * 1e18 / supply` -- SwapPool.sol L591-594. **Derivation:** _lpToShares converts LP tokens to normalized share value using current rate. Rate starts at 1e18 (1:1) and increases as fees accrue.
+For each user U, tokenId T:
+`freshDeposit[U][T].amount <= balanceOf(U, T)`
+(after graduation of matured deposits)
 
-#### I-6 StateMachine: _initialized transitions false -> true (one-shot)
+**Derivation:** On outflow, `_update` consumes matured first, then reduces `sf.amount` by `value - matured`. On inflow, `tf.amount += value` and balance also increases by `value` (from `super._update`). Graduation zeros `sf.amount` when `block.timestamp >= timestamp + LOCK_PERIOD`.
 
-`_initialized: false -> true`, never back -- SwapPool.sol L198 (set), L196 (guard). **Derivation:** initialize() checks _initialized is false before setting true; no function sets it back to false.
+**Caveat (attack surface 2.3):** When `from == to` (self-transfer), `super._update` is a no-op on balance, but the outflow branch reads `preBalance = balanceOf(from, id) + value` (overestimated since balance was not reduced), and the inflow branch adds `value` to `tf.amount`. This can inflate `fresh.amount` above actual balance.
 
-#### I-7 StateMachine: pool[tokenId] transitions address(0) -> pool (one-shot)
+#### I-4: TokenId uniqueness per factory
 
-`pool[tokenId]: address(0) -> nonzero`, never changed after -- LPToken.sol L101-102. **Derivation:** registerPool checks pool[tokenId] == address(0) before assignment; no function can overwrite a non-zero mapping entry.
+For each PoolFactory instance:
+- Each marketA tokenId is used by at most one pool: `usedMarketATokenId[id]` set true on first use, checked before reuse.
+- Each marketB tokenId is used by at most one pool: `usedMarketBTokenId[id]` set true on first use.
+- LP tokenId == market tokenId, so LP token registration cannot collide within a factory.
 
-#### I-8 Bound: marketARate >= 1e18 and marketBRate >= 1e18
-
-`rate >= RATE_PRECISION` under normal operation -- SwapPool.sol L212-216, L219-222. **Derivation:** initial deposit sets sideValue = normAmount and supply = normAmount, so rate = 1e18. Swap fees only add to sideValue (never subtract). Withdrawal with fee: fee stays in sideValue, net subtraction < shares. Rate can only increase. **Caveat:** violated if value accounting bug in withdrawal creates sideValue < supply.
-
-#### I-9 Temporal: lockedAmount = 0 when block.timestamp >= freshDeposit.timestamp + LOCK_PERIOD
-
-`lockedAmount(user, tokenId) == 0` when `block.timestamp >= fd.timestamp + LOCK_PERIOD` -- LPToken.sol L121-122. **Derivation:** lockedAmount() is a pure view that checks the time condition. The FreshDeposit struct is the source of truth; graduation is lazy (happens on next inflow/outflow touch). The view correctly returns 0 even before graduation.
-
----
-
-## Cross-Contract Invariants (X-N)
-
-#### X-1 SwapPool <-> LPToken mint/burn totalSupply consistency
-
-`LPToken.totalSupply(lpTokenId)` always equals the cumulative minted minus burned for that tokenId by SwapPool -- SwapPool.sol L616-621 (mint), L608-613 (burn); LPToken.sol L106-109 (mint), L111-114 (burn). **Derivation:** SwapPool is the only address authorized to mint/burn (G-18 enforces pool[tokenId] == SwapPool address). LPToken.mint increments totalSupply, burn decrements. No other write path to totalSupply for a given tokenId.
-
-#### X-2 SwapPool -> FeeCollector push-before-recordFee ordering
-
-Physical token transfer to FeeCollector always precedes the recordFee call -- SwapPool.sol L310-311 (swap), L402-403 (withdrawal). **Derivation:** _pushTokens (safeTransferFrom) is called before feeCollector.recordFee in both swap and withdrawal. If the push reverts, recordFee is never reached. This prevents recording fees that were not actually transferred.
-
-#### X-3 SwapPool reads LPToken.lockedAmount/balanceOf for JIT fee
-
-SwapPool._freshConsumedForBurn reads LPToken state to determine JIT fee base -- SwapPool.sol L599-606; LPToken.sol L119-125. **Derivation:** _freshConsumedForBurn calls lp.balanceOf and lp.lockedAmount for the caller. These are view calls that read current state BEFORE the burn. The burn (which updates the fresh bucket) happens after the fee calculation at L392. This ordering is correct: fee is computed on pre-burn state.
-
-#### X-4 PoolFactory.setFeeCollector does NOT update existing pools' immutable feeCollector
-
-SwapPool.feeCollector is immutable (set at construction from factory.feeCollector at that time) -- SwapPool.sol L63; PoolFactory.sol L213 (passes address(feeCollector) to constructor), L283-287 (updates factory.feeCollector). **Derivation:** immutable variables are set once in the constructor and stored in contract bytecode. PoolFactory.setFeeCollector only changes the factory's state variable; existing SwapPool instances retain their original feeCollector address forever. Only pools created after the change use the new address.
+**Derivation:** `createPool` checks `usedMarketATokenId[marketA_.tokenId]` and `usedMarketBTokenId[marketB_.tokenId]` before setting them true. `LPToken.registerPool` independently rejects if `pool[tokenId] != address(0)`. Both are one-shot: no path unsets them.
 
 ---
 
-## Economic Invariants (E-N)
+## Cross-Function Invariants
 
-#### E-1 LP share value monotonically non-decreasing from fees
+#### X-1: Withdrawal payout <= LP claim value
 
-For each side, `sideValue / totalSupply >= previous(sideValue / totalSupply)` under normal operation -- SwapPool.sol L268-270 (deposit preserves rate), L297-320 (swap adds lpFee to drained side). **Derivation:** deposit mints LP proportional to current rate, preserving rate. Swap adds lpFee to toSide sideValue without minting LP, increasing rate. Same-side withdrawal with JIT fee: fee stays in sideValue (unless last-LP), net rate preserved. Cross-side withdrawal: lpFee added to receiveSide sideValue. **Caveat:** last-LP same-side JIT path (L378-382) subtracts full shares from lpSide and adds lpFee to opposite side; this can decrease the opposite side's effective rate if the opposite supply is large relative to lpFee.
+For any withdrawal (same-side or cross-side):
+`payout = shares - lpFee - protocolFee`, where `shares = lpAmount * rate / 1e18`.
+Payout is always strictly less than or equal to the LP's proportional claim.
 
-#### E-2 No tokens extractable without LP burn or valid swap math
+**Derivation:** `_lpToShares` computes `(lpAmount * rate) / RATE_PRECISION`. Fees are subtracted: `payout = shares - lpFee - protocolFee`. `_computeFees` uses ceiling rounding: `totalFee = (normAmount * totalBps + FEE_DENOMINATOR - 1) / FEE_DENOMINATOR`, ensuring fees are never undercharged. When resolved, fees are zero so payout == shares.
 
-Every outflow from SwapPool (except rescue and flush) requires either LP burn or swap fee deduction -- SwapPool.sol L252 (deposit: inflow only), L284 (swap: normOut < normIn), L337 (withdrawal: burns LP), L422 (withdrawProRata: burns LP), L541 (rescue: owner-gated, surplus-checked), L476 (_flushResidualIfEmpty: only when all LP burned). **Derivation:** deposit is inflow-only. swap output is strictly less than input (by fees). withdrawal and withdrawProRata both burn LP before pushing tokens. rescue requires owner privilege and global surplus. flush only triggers when totalSupply == 0 across both sides.
+**Tested by:** `invariant_RateAtLeast1e18` (rate never decreases, so LP always gets at least deposit back from rate perspective). `testFuzz_Withdrawal_DepositWithdrawNoProfit` (no instant profit from deposit-then-withdraw).
+
+#### X-2: JIT fee is proportional to fresh consumed
+
+For same-side withdrawal when `!resolved`:
+`feeBase = (shares * freshBurned) / lpAmount` where `freshBurned = max(0, lpAmount - matured)`.
+
+**Derivation:** `_freshConsumedForBurn` reads `balance = lp.balanceOf(msg.sender, tokenId)` and `locked = lp.lockedAmount(msg.sender, tokenId)`. `matured = balance - locked`. `freshBurned = max(0, lpAmount - matured)`. Then `feeBase = (shares * freshBurned) / lpAmount` -- fee scales linearly with the fraction of LP that is fresh.
+
+**Caveat:** If `lockedAmount` is inflated due to self-transfer corruption (I-3), `freshBurned` will be overestimated, and the user pays more JIT fee than warranted.
+
+#### X-3: ProRata proportional fairness
+
+For withdrawProRata:
+`nativeShare = (lpAmount * availableNative) / totalSupply`, capped at `shares`.
+Each LP gets the same fraction of native-side physical reserves.
+
+**Derivation:** The formula ensures proportional distribution: two LPs with equal LP balances get equal shares of native reserves. The cap at `shares` prevents overpayment when native reserves exceed obligations. Cross-side remainder inherits the shortfall. No fees are charged.
+
+**Tested by:** `testFuzz_ProRata_NeverOverpays`, `testFuzz_ProRata_NoFees`.
+
+---
+
+## Edge-Case Invariants
+
+#### E-1: Flush residual sweep
+
+When `aSupply + bSupply == 0` (all LP burned), `_flushResidualIfEmpty` zeros both `aSideValue` and `bSideValue`, then sweeps all remaining physical tokens to `feeCollector`.
+
+**Derivation:** Called at the end of `withdrawal` and `withdrawProRata`. Checks `factory.marketALpToken().totalSupply(marketALpTokenId) + factory.marketBLpToken().totalSupply(marketBLpTokenId) == 0`. If true, reads raw balances of both sides and pushes any nonzero amount to feeCollector with `recordFee`.
+
+**Tested by:** `testFuzz_FlushResidual_FullExit`.
+
+**Significance:** Without this, rounding dust would be trapped permanently. The sweep ensures no value is locked in an empty pool.
+
+#### E-2: First depositor gets 1:1 LP
+
+When `totalSupply == 0` for a side, `deposit` mints `lpMinted = normAmount` (1:1 with normalized deposit).
+
+**Derivation:** `SwapPool.deposit` line 268-269: `lpMinted = (supply == 0) ? normAmount : (normAmount * supply) / sideValue`. First depositor sets the baseline rate at exactly 1e18. Subsequent depositors get LP proportional to their contribution relative to existing sideValue.
+
+**Significance:** No inflation attack vector because the first deposit directly sets supply = normAmount and sideValue = normAmount, yielding rate = 1e18. There is no share-price manipulation window between the first mint and value assignment (both happen atomically in the same call).

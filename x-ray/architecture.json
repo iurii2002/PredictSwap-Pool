@@ -1,40 +1,29 @@
 {
+  "title": "PredictSwap v3 Architecture",
   "nodes": [
-    { "id": "user",          "label": "User",             "type": "actor",    "row": 0 },
-    { "id": "operator",      "label": "Operator",         "type": "actor",    "row": 0 },
-    { "id": "owner",         "label": "Owner",            "type": "actor",    "row": 0 },
-    { "id": "factory",       "label": "PoolFactory",      "type": "protocol", "row": 1 },
-    { "id": "pool",          "label": "SwapPool",         "type": "protocol", "row": 2 },
-    { "id": "lp_a",          "label": "LPToken A",        "type": "protocol", "row": 2 },
-    { "id": "lp_b",          "label": "LPToken B",        "type": "protocol", "row": 2 },
-    { "id": "fee_collector", "label": "FeeCollector",     "type": "protocol", "row": 3 },
-    { "id": "mkt_a",         "label": "Market A (ERC1155)", "type": "external", "row": 3 },
-    { "id": "mkt_b",         "label": "Market B (ERC1155)", "type": "external", "row": 3 }
+    {"id": "owner",        "label": "Owner",              "subtitle": "Trusted Admin",    "type": "actor",    "row": 0},
+    {"id": "operator",     "label": "Operator",           "subtitle": "Bounded Role",     "type": "actor",    "row": 0},
+    {"id": "user",         "label": "User / LP",          "subtitle": "Permissionless",   "type": "actor",    "row": 0},
+    {"id": "factory",      "label": "PoolFactory",        "subtitle": "Registry",         "type": "protocol", "row": 1},
+    {"id": "swappool",     "label": "SwapPool",           "subtitle": "Core Pool",        "type": "protocol", "row": 1},
+    {"id": "feecollector", "label": "FeeCollector",       "subtitle": "Fee Accumulator",  "type": "protocol", "row": 1},
+    {"id": "lptoken",      "label": "LPToken",            "subtitle": "A-side / B-side",  "type": "protocol", "row": 2},
+    {"id": "market_tokens","label": "Market ERC-1155",    "subtitle": "Prediction Shares","type": "external", "row": 2}
   ],
   "edges": [
-    { "from": "user",     "to": "pool",          "label": "deposit / swap / withdraw" },
-    { "from": "operator", "to": "factory",       "label": "create / pause / resolve" },
-    { "from": "owner",    "to": "factory",       "label": "setFees / rescue" },
-    { "from": "owner",    "to": "fee_collector", "label": "withdraw fees" },
-    { "from": "factory",  "to": "pool",          "label": "deploy + admin relay" },
-    { "from": "factory",  "to": "lp_a",          "label": "registerPool" },
-    { "from": "factory",  "to": "lp_b",          "label": "registerPool" },
-    { "from": "pool",     "to": "lp_a",          "label": "mint / burn" },
-    { "from": "pool",     "to": "lp_b",          "label": "mint / burn" },
-    { "from": "pool",     "to": "mkt_a",         "label": "pull / push shares" },
-    { "from": "pool",     "to": "mkt_b",         "label": "pull / push shares" },
-    { "from": "pool",     "to": "fee_collector", "label": "push fee + recordFee" }
+    {"from": "owner",        "to": "factory",       "label": "admin calls"},
+    {"from": "operator",     "to": "factory",       "label": "create / pause"},
+    {"from": "owner",        "to": "feecollector",  "label": "withdraw fees"},
+    {"from": "user",         "to": "swappool",      "label": "deposit / swap / withdraw"},
+    {"from": "factory",      "to": "swappool",      "label": "deploy + gate"},
+    {"from": "factory",      "to": "lptoken",       "label": "registerPool"},
+    {"from": "swappool",     "to": "lptoken",       "label": "mint / burn LP"},
+    {"from": "swappool",     "to": "feecollector",  "label": "push protocol fee"},
+    {"from": "swappool",     "to": "market_tokens", "label": "pull / push shares"}
   ],
   "groups": [
-    {
-      "id": "core",
-      "label": "PredictSwap v3 Core",
-      "nodes": ["factory", "pool", "lp_a", "lp_b", "fee_collector"]
-    },
-    {
-      "id": "external_markets",
-      "label": "External Prediction Markets",
-      "nodes": ["mkt_a", "mkt_b"]
-    }
+    {"label": "Actors",          "nodes": ["owner", "operator", "user"]},
+    {"label": "PredictSwap v3",  "nodes": ["factory", "swappool", "feecollector", "lptoken"]},
+    {"label": "External",        "nodes": ["market_tokens"]}
   ]
 }

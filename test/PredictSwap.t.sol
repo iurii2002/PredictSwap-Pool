@@ -428,6 +428,27 @@ contract PredictSwapV3Test is Test {
         pool.swap(SwapPool.Side.MARKET_A, 100 * MARKET_A_DEC_RAW);
     }
 
+    function testSwap_RevertsWhenResolved() public {
+        vm.prank(lp1);
+        pool.deposit(SwapPool.Side.MARKET_A, 1000 * MARKET_A_DEC_RAW);
+        vm.prank(lp2);
+        pool.deposit(SwapPool.Side.MARKET_B, 1000 * MARKET_B_DEC_RAW);
+
+        vm.prank(operator);
+        factory.setResolvePool(0, true);
+
+        vm.prank(swapper);
+        vm.expectRevert(SwapPool.MarketResolved.selector);
+        pool.swap(SwapPool.Side.MARKET_A, 100 * MARKET_A_DEC_RAW);
+    }
+
+    function testSwap_RevertsOnZeroAmount() public {
+        vm.prank(swapper);
+        vm.expectRevert(SwapPool.ZeroAmount.selector);
+        pool.swap(SwapPool.Side.MARKET_A, 0);
+    }
+
+
     // ─────────────────────────────────────────────────────────────────────────
     //                              WITHDRAWAL (unified)
     // ─────────────────────────────────────────────────────────────────────────
@@ -623,6 +644,43 @@ contract PredictSwapV3Test is Test {
         _assertValueInvariant();
     }
 
+    function testWithdrawal_CrossSide_Resolved_NoFee() public {
+        vm.prank(lp1);
+        pool.deposit(SwapPool.Side.MARKET_A, 1000 * MARKET_A_DEC_RAW);
+        vm.prank(lp2);
+        pool.deposit(SwapPool.Side.MARKET_B, 1000 * MARKET_B_DEC_RAW);
+
+        vm.prank(operator);
+        factory.setResolvePool(0, true);
+
+        uint256 bal = marketALpToken.balanceOf(lp1, lpIdA);
+        uint256 bBefore = marketBToken.balanceOf(lp1, MARKET_B_ID);
+
+        vm.prank(lp1);
+        pool.withdrawal(SwapPool.Side.MARKET_B, bal, SwapPool.Side.MARKET_A);
+
+        uint256 received = marketBToken.balanceOf(lp1, MARKET_B_ID) - bBefore;
+        assertEq(received, 1000 * MARKET_B_DEC_RAW, "full claim when resolved");
+    }
+
+    function testWithdrawal_SameSide_Resolved_FreshLP_NoFee() public {
+        vm.prank(lp1);
+        pool.deposit(SwapPool.Side.MARKET_A, 1000 * MARKET_A_DEC_RAW);
+        vm.prank(lp2);
+        pool.deposit(SwapPool.Side.MARKET_B, 1000 * MARKET_B_DEC_RAW);
+
+        vm.prank(operator);
+        factory.setResolvePool(0, true);
+
+        uint256 bal = marketALpToken.balanceOf(lp1, lpIdA);
+        uint256 aBefore = marketAToken.balanceOf(lp1, MARKET_A_ID);
+
+        vm.prank(lp1);
+        pool.withdrawal(SwapPool.Side.MARKET_A, bal, SwapPool.Side.MARKET_A);
+
+        assertEq(marketAToken.balanceOf(lp1, MARKET_A_ID) - aBefore, 1000 * MARKET_A_DEC_RAW);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     //                             WITHDRAW PRO-RATA
     // ─────────────────────────────────────────────────────────────────────────
@@ -687,6 +745,35 @@ contract PredictSwapV3Test is Test {
         pool.withdrawProRata(bal, SwapPool.Side.MARKET_A);
 
         assertEq(marketAToken.balanceOf(address(feeCollector), MARKET_A_ID), 0, "pro-rata never fees");
+    }
+
+    function testWithdrawProRata_RevertsOnZeroAmount() public {
+        vm.prank(operator);
+        factory.setPoolSwapsPaused(0, true);
+
+        vm.prank(lp1);
+        vm.expectRevert(SwapPool.ZeroAmount.selector);
+        pool.withdrawProRata(0, SwapPool.Side.MARKET_A);
+    }
+
+    function testWithdrawProRata_CrossSideCheck() public {
+        vm.prank(lp1);
+        pool.deposit(SwapPool.Side.MARKET_A, 1000 * MARKET_A_DEC_RAW);
+        vm.prank(lp2);
+        pool.deposit(SwapPool.Side.MARKET_B, 1000 * MARKET_B_DEC_RAW);
+
+        vm.prank(swapper);
+        pool.swap(SwapPool.Side.MARKET_B, 900 * MARKET_B_DEC_RAW);
+
+        vm.prank(operator);
+        factory.setPoolSwapsPaused(0, true);
+
+        uint256 bal = marketALpToken.balanceOf(lp1, lpIdA);
+        vm.prank(lp1);
+        (uint256 nativeOut, uint256 crossOut) = pool.withdrawProRata(bal, SwapPool.Side.MARKET_A);
+
+        assertGt(nativeOut, 0, "native portion");
+        assertGt(crossOut, 0, "cross portion");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -803,6 +890,138 @@ contract PredictSwapV3Test is Test {
         feeCollector.withdrawAll(address(marketAToken), MARKET_A_ID, recv);
     }
 
+    function testFeeCollector_RecordFee_RevertsOnZero() public {
+        vm.expectRevert(FeeCollector.ZeroAmount.selector);
+        feeCollector.recordFee(address(marketAToken), MARKET_A_ID, 0);
+    }
+
+    function testFeeCollector_RecordFee_AnyoneCanCall() public {
+        vm.prank(attacker);
+        feeCollector.recordFee(address(marketAToken), MARKET_A_ID, 100);
+    }
+
+    function testFeeCollector_Withdraw_RevertsOnZeroAddress() public {
+        marketAToken.mint(address(feeCollector), MARKET_A_ID, 1000);
+        vm.prank(owner);
+        vm.expectRevert(FeeCollector.ZeroAddress.selector);
+        feeCollector.withdraw(address(marketAToken), MARKET_A_ID, 100, address(0));
+    }
+
+    function testFeeCollector_Withdraw_RevertsOnZeroAmount() public {
+        vm.prank(owner);
+        vm.expectRevert(FeeCollector.ZeroAmount.selector);
+        feeCollector.withdraw(address(marketAToken), MARKET_A_ID, 0, recv);
+    }
+
+    function testFeeCollector_WithdrawBatch_TransfersTokens() public {
+        marketAToken.mint(address(feeCollector), MARKET_A_ID, 500);
+        marketAToken.mint(address(feeCollector), MARKET_A_ID_2, 300);
+
+        uint256[] memory ids = new uint256[](2);
+        ids[0] = MARKET_A_ID;
+        ids[1] = MARKET_A_ID_2;
+        uint256[] memory amounts = new uint256[](2);
+        amounts[0] = 500;
+        amounts[1] = 300;
+
+        vm.prank(owner);
+        feeCollector.withdrawBatch(address(marketAToken), ids, amounts, recv);
+
+        assertEq(marketAToken.balanceOf(recv, MARKET_A_ID), 500);
+        assertEq(marketAToken.balanceOf(recv, MARKET_A_ID_2), 300);
+    }
+
+    function testFeeCollector_WithdrawBatch_RevertsOnZeroAddress() public {
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = MARKET_A_ID;
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 100;
+
+        vm.prank(owner);
+        vm.expectRevert(FeeCollector.ZeroAddress.selector);
+        feeCollector.withdrawBatch(address(marketAToken), ids, amounts, address(0));
+    }
+
+    function testFeeCollector_WithdrawBatch_RevertsOnZeroAmount() public {
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = MARKET_A_ID;
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 0;
+
+        vm.prank(owner);
+        vm.expectRevert(FeeCollector.ZeroAmount.selector);
+        feeCollector.withdrawBatch(address(marketAToken), ids, amounts, recv);
+    }
+
+    function testFeeCollector_WithdrawBatch_RevertsForNonOwner() public {
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = MARKET_A_ID;
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 100;
+
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, attacker));
+        feeCollector.withdrawBatch(address(marketAToken), ids, amounts, recv);
+    }
+
+    function testFeeCollector_WithdrawAll_RevertsOnZeroBalance() public {
+        vm.prank(owner);
+        vm.expectRevert(FeeCollector.ZeroAmount.selector);
+        feeCollector.withdrawAll(address(marketAToken), MARKET_A_ID, recv);
+    }
+
+    function testFeeCollector_WithdrawAll_RevertsOnZeroAddress() public {
+        marketAToken.mint(address(feeCollector), MARKET_A_ID, 100);
+        vm.prank(owner);
+        vm.expectRevert(FeeCollector.ZeroAddress.selector);
+        feeCollector.withdrawAll(address(marketAToken), MARKET_A_ID, address(0));
+    }
+
+    function testFeeCollector_WithdrawAllBatch_TransfersOnlyNonZero() public {
+        marketAToken.mint(address(feeCollector), MARKET_A_ID, 500);
+        // MARKET_A_ID_2 has zero balance — should be skipped
+
+        uint256[] memory ids = new uint256[](2);
+        ids[0] = MARKET_A_ID;
+        ids[1] = MARKET_A_ID_2;
+
+        vm.prank(owner);
+        feeCollector.withdrawAllBatch(address(marketAToken), ids, recv);
+
+        assertEq(marketAToken.balanceOf(recv, MARKET_A_ID), 500);
+        assertEq(marketAToken.balanceOf(recv, MARKET_A_ID_2), 0);
+    }
+
+    function testFeeCollector_WithdrawAllBatch_RevertsOnAllZero() public {
+        uint256[] memory ids = new uint256[](2);
+        ids[0] = MARKET_A_ID;
+        ids[1] = MARKET_A_ID_2;
+
+        vm.prank(owner);
+        vm.expectRevert(FeeCollector.ZeroAmount.selector);
+        feeCollector.withdrawAllBatch(address(marketAToken), ids, recv);
+    }
+
+    function testFeeCollector_WithdrawAllBatch_RevertsOnZeroAddress() public {
+        marketAToken.mint(address(feeCollector), MARKET_A_ID, 100);
+
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = MARKET_A_ID;
+
+        vm.prank(owner);
+        vm.expectRevert(FeeCollector.ZeroAddress.selector);
+        feeCollector.withdrawAllBatch(address(marketAToken), ids, address(0));
+    }
+
+    function testFeeCollector_WithdrawAllBatch_RevertsForNonOwner() public {
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = MARKET_A_ID;
+
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, attacker));
+        feeCollector.withdrawAllBatch(address(marketAToken), ids, recv);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     //                                FACTORY
     // ─────────────────────────────────────────────────────────────────────────
@@ -900,6 +1119,220 @@ contract PredictSwapV3Test is Test {
         assertEq(factory2.marketBLpToken().name(), "Flipflop LP");
     }
 
+    function testFactory_Constructor_RevertsOnZeroMarketA() public {
+        vm.expectRevert(PoolFactory.ZeroAddress.selector);
+        new PoolFactory(address(0), address(marketBToken), address(feeCollector), operator, owner, "A", "B", "A-LP", "B-LP");
+    }
+
+    function testFactory_Constructor_RevertsOnZeroMarketB() public {
+        vm.expectRevert(PoolFactory.ZeroAddress.selector);
+        new PoolFactory(address(marketAToken), address(0), address(feeCollector), operator, owner, "A", "B", "A-LP", "B-LP");
+    }
+
+    function testFactory_Constructor_RevertsOnZeroFeeCollector() public {
+        vm.expectRevert(PoolFactory.ZeroAddress.selector);
+        new PoolFactory(address(marketAToken), address(marketBToken), address(0), operator, owner, "A", "B", "A-LP", "B-LP");
+    }
+
+    function testFactory_Constructor_RevertsOnZeroOperator() public {
+        vm.expectRevert(PoolFactory.ZeroAddress.selector);
+        new PoolFactory(address(marketAToken), address(marketBToken), address(feeCollector), address(0), owner, "A", "B", "A-LP", "B-LP");
+    }
+
+    function testFactory_Constructor_RevertsOnEmptyMarketAName() public {
+        vm.expectRevert(PoolFactory.MissingName.selector);
+        new PoolFactory(address(marketAToken), address(marketBToken), address(feeCollector), operator, owner, "", "B", "A-LP", "B-LP");
+    }
+
+    function testFactory_Constructor_RevertsOnEmptyMarketBName() public {
+        vm.expectRevert(PoolFactory.MissingName.selector);
+        new PoolFactory(address(marketAToken), address(marketBToken), address(feeCollector), operator, owner, "A", "", "A-LP", "B-LP");
+    }
+
+    function testFactory_Constructor_RevertsOnEmptyLpAName() public {
+        vm.expectRevert(PoolFactory.MissingName.selector);
+        new PoolFactory(address(marketAToken), address(marketBToken), address(feeCollector), operator, owner, "A", "B", "", "B-LP");
+    }
+
+    function testFactory_Constructor_RevertsOnEmptyLpBName() public {
+        vm.expectRevert(PoolFactory.MissingName.selector);
+        new PoolFactory(address(marketAToken), address(marketBToken), address(feeCollector), operator, owner, "A", "B", "A-LP", "");
+    }
+
+    function testFactory_CreatePool_RevertsOnZeroTokenIdA() public {
+        vm.prank(operator);
+        vm.expectRevert(PoolFactory.InvalidTokenID.selector);
+        factory.createPool(
+            PoolFactory.MarketConfig({tokenId: 0, decimals: 18}),
+            PoolFactory.MarketConfig({tokenId: 999, decimals: 18}),
+            LP_FEE_BPS, PROTOCOL_FEE_BPS, "bad"
+        );
+    }
+
+    function testFactory_CreatePool_RevertsOnZeroTokenIdB() public {
+        vm.prank(operator);
+        vm.expectRevert(PoolFactory.InvalidTokenID.selector);
+        factory.createPool(
+            PoolFactory.MarketConfig({tokenId: 999, decimals: 18}),
+            PoolFactory.MarketConfig({tokenId: 0, decimals: 18}),
+            LP_FEE_BPS, PROTOCOL_FEE_BPS, "bad"
+        );
+    }
+
+    function testFactory_CreatePool_RevertsOnInvalidDecimalsA() public {
+        vm.prank(operator);
+        vm.expectRevert(PoolFactory.InvalidDecimals.selector);
+        factory.createPool(
+            PoolFactory.MarketConfig({tokenId: 999, decimals: 19}),
+            PoolFactory.MarketConfig({tokenId: 998, decimals: 18}),
+            LP_FEE_BPS, PROTOCOL_FEE_BPS, "bad"
+        );
+    }
+
+    function testFactory_CreatePool_RevertsOnInvalidDecimalsB() public {
+        vm.prank(operator);
+        vm.expectRevert(PoolFactory.InvalidDecimals.selector);
+        factory.createPool(
+            PoolFactory.MarketConfig({tokenId: 999, decimals: 18}),
+            PoolFactory.MarketConfig({tokenId: 998, decimals: 19}),
+            LP_FEE_BPS, PROTOCOL_FEE_BPS, "bad"
+        );
+    }
+
+    function testFactory_CreatePool_RevertsOnDuplicatePoolKey() public {
+        vm.prank(operator);
+        vm.expectRevert();
+        factory.createPool(
+            PoolFactory.MarketConfig({tokenId: MARKET_A_ID, decimals: MARKET_A_DEC}),
+            PoolFactory.MarketConfig({tokenId: MARKET_B_ID, decimals: MARKET_B_DEC}),
+            LP_FEE_BPS, PROTOCOL_FEE_BPS, "dup"
+        );
+    }
+
+    function testFactory_CreatePool_RevertsOnFeeTooHighLp() public {
+        vm.prank(operator);
+        vm.expectRevert(SwapPool.FeeTooHigh.selector);
+        factory.createPool(
+            PoolFactory.MarketConfig({tokenId: 999, decimals: 18}),
+            PoolFactory.MarketConfig({tokenId: 998, decimals: 18}),
+            101, PROTOCOL_FEE_BPS, "bad"
+        );
+    }
+
+    function testFactory_CreatePool_RevertsOnFeeTooHighProtocol() public {
+        vm.prank(operator);
+        vm.expectRevert(SwapPool.FeeTooHigh.selector);
+        factory.createPool(
+            PoolFactory.MarketConfig({tokenId: 999, decimals: 18}),
+            PoolFactory.MarketConfig({tokenId: 998, decimals: 18}),
+            LP_FEE_BPS, 51, "bad"
+        );
+    }
+
+    function testFactory_CreatePool_RevertsForNonOperator() public {
+        vm.prank(attacker);
+        vm.expectRevert(PoolFactory.NotOperator.selector);
+        factory.createPool(
+            PoolFactory.MarketConfig({tokenId: 999, decimals: 18}),
+            PoolFactory.MarketConfig({tokenId: 998, decimals: 18}),
+            LP_FEE_BPS, PROTOCOL_FEE_BPS, "bad"
+        );
+    }
+
+    function testFactory_SetOperator_RevertsOnZeroAddress() public {
+        vm.prank(owner);
+        vm.expectRevert(PoolFactory.ZeroAddress.selector);
+        factory.setOperator(address(0));
+    }
+
+    function testFactory_SetOperator_Works() public {
+        address newOp = makeAddr("newOp");
+        vm.prank(owner);
+        factory.setOperator(newOp);
+        assertEq(factory.operator(), newOp);
+    }
+
+    function testFactory_SetFeeCollector_RevertsOnZeroAddress() public {
+        vm.prank(owner);
+        vm.expectRevert(PoolFactory.ZeroAddress.selector);
+        factory.setFeeCollector(address(0));
+    }
+
+    function testFactory_SetFeeCollector_Works() public {
+        FeeCollector fc2 = new FeeCollector(owner);
+        vm.prank(owner);
+        factory.setFeeCollector(address(fc2));
+        assertEq(address(factory.feeCollector()), address(fc2));
+    }
+
+    function testFactory_SetPoolFees_Works() public {
+        vm.prank(owner);
+        factory.setPoolFees(0, 50, 20);
+        assertEq(pool.lpFeeBps(), 50);
+        assertEq(pool.protocolFeeBps(), 20);
+    }
+
+    function testFactory_SetPoolFees_RevertsOnInvalidPool() public {
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(PoolFactory.PoolNotFound.selector, 999));
+        factory.setPoolFees(999, 50, 20);
+    }
+
+    function testFactory_GetPool_RevertsOnInvalidId() public {
+        vm.expectRevert(abi.encodeWithSelector(PoolFactory.PoolNotFound.selector, 999));
+        factory.getPool(999);
+    }
+
+    function testFactory_GetAllPools_ReturnsArray() public view {
+        PoolFactory.PoolInfo[] memory allPools = factory.getAllPools();
+        assertEq(allPools.length, 1);
+    }
+
+    function testFactory_PoolCount_ReturnsCorrect() public view {
+        assertEq(factory.poolCount(), 1);
+    }
+
+    function testFactory_FindPool_ReturnsCorrectPool() public view {
+        (bool found, uint256 id) = factory.findPool(MARKET_A_ID, MARKET_B_ID);
+        assertTrue(found);
+        assertEq(id, 0);
+    }
+
+    function testFactory_FindPool_ReturnsFalseForMissing() public view {
+        (bool found,) = factory.findPool(999, 998);
+        assertFalse(found);
+    }
+
+    function testFactory_SetPoolDepositsPaused_RevertsOnInvalidPool() public {
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(PoolFactory.PoolNotFound.selector, 999));
+        factory.setPoolDepositsPaused(999, true);
+    }
+
+    function testFactory_SetPoolSwapsPaused_RevertsOnInvalidPool() public {
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(PoolFactory.PoolNotFound.selector, 999));
+        factory.setPoolSwapsPaused(999, true);
+    }
+
+    function testFactory_SetResolvePool_RevertsOnInvalidPool() public {
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(PoolFactory.PoolNotFound.selector, 999));
+        factory.setResolvePool(999, true);
+    }
+
+    function testFactory_ResolvePoolAndPause_RevertsOnInvalidPool() public {
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(PoolFactory.PoolNotFound.selector, 999));
+        factory.resolvePoolAndPause(999);
+    }
+
+    function testFactory_OwnerCanActAsOperator() public {
+        vm.prank(owner);
+        factory.setPoolDepositsPaused(0, true);
+        assertTrue(pool.depositsPaused());
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     //                          FLUSH RESIDUAL / RESCUE
     // ─────────────────────────────────────────────────────────────────────────
@@ -960,4 +1393,230 @@ contract PredictSwapV3Test is Test {
         factory.rescuePoolTokens(0, SwapPool.Side.MARKET_A, 50 * MARKET_A_DEC_RAW, recv);
         assertEq(marketAToken.balanceOf(recv, MARKET_A_ID) - recvBefore, 50 * MARKET_A_DEC_RAW);
     }
+
+    function testRescue_RevertsForNonFactory() public {
+        vm.prank(attacker);
+        vm.expectRevert(SwapPool.Unauthorized.selector);
+        pool.rescueTokens(SwapPool.Side.MARKET_A, 1, recv);
+    }
+
+    function testRescue_RevertsOnZeroAddress() public {
+        marketAToken.mint(address(pool), MARKET_A_ID, 100 * MARKET_A_DEC_RAW);
+        vm.prank(owner);
+        vm.expectRevert(SwapPool.ZeroAddress.selector);
+        factory.rescuePoolTokens(0, SwapPool.Side.MARKET_A, 100, address(0));
+    }
+
+    function testRescue_RevertsWhenSurplusExceeded() public {
+        marketAToken.mint(address(pool), MARKET_A_ID, 50 * MARKET_A_DEC_RAW);
+        vm.prank(owner);
+        vm.expectRevert(SwapPool.NothingToRescue.selector);
+        factory.rescuePoolTokens(0, SwapPool.Side.MARKET_A, 51 * MARKET_A_DEC_RAW, recv);
+    }
+
+    function testRescue_GlobalSurplusCalculation() public {
+        marketAToken.mint(address(pool), MARKET_A_ID, 100 * MARKET_A_DEC_RAW);
+        marketBToken.mint(address(pool), MARKET_B_ID, 50 * MARKET_B_DEC_RAW);
+
+        vm.prank(owner);
+        factory.rescuePoolTokens(0, SwapPool.Side.MARKET_A, 50 * MARKET_A_DEC_RAW, recv);
+        assertEq(marketAToken.balanceOf(recv, MARKET_A_ID), 50 * MARKET_A_DEC_RAW);
+
+        vm.prank(owner);
+        factory.rescuePoolTokens(0, SwapPool.Side.MARKET_B, 50 * MARKET_B_DEC_RAW, recv);
+        assertEq(marketBToken.balanceOf(recv, MARKET_B_ID), 50 * MARKET_B_DEC_RAW);
+    }
+
+    function testRescueERC1155_RevertsOnPoolTokenContract() public {
+        vm.prank(owner);
+        vm.expectRevert(SwapPool.CannotRescuePoolTokens.selector);
+        factory.rescuePoolERC1155(0, address(marketAToken), MARKET_A_ID, 1, recv);
+    }
+
+    function testRescueERC1155_RevertsOnPoolTokenContractB() public {
+        vm.prank(owner);
+        vm.expectRevert(SwapPool.CannotRescuePoolTokens.selector);
+        factory.rescuePoolERC1155(0, address(marketBToken), MARKET_B_ID, 1, recv);
+    }
+
+    function testRescueERC1155_CanRescueOtherContracts() public {
+        MockERC1155 otherToken = new MockERC1155();
+        otherToken.mint(address(pool), 1, 500);
+
+        vm.prank(owner);
+        factory.rescuePoolERC1155(0, address(otherToken), 1, 500, recv);
+        assertEq(otherToken.balanceOf(recv, 1), 500);
+    }
+
+    function testRescueERC20_Works() public {
+        // SwapPool uses SafeERC20; for this test we just verify auth
+        vm.prank(attacker);
+        vm.expectRevert(SwapPool.Unauthorized.selector);
+        pool.rescueERC20(address(0x1), 1, recv);
+    }
+
+    function testRescueETH_Works() public {
+        vm.deal(address(pool), 1 ether);
+        uint256 before = recv.balance;
+        vm.prank(owner);
+        factory.rescuePoolETH(0, payable(recv));
+        assertEq(recv.balance - before, 1 ether);
+    }
+
+    function testRescueETH_RevertsOnZeroAddress() public {
+        vm.prank(owner);
+        vm.expectRevert(SwapPool.ZeroAddress.selector);
+        factory.rescuePoolETH(0, payable(address(0)));
+    }
+
+    function testRescuePoolTokens_RevertsOnInvalidPool() public {
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(PoolFactory.PoolNotFound.selector, 999));
+        factory.rescuePoolTokens(999, SwapPool.Side.MARKET_A, 1, recv);
+    }
+
+    function testRescuePoolERC1155_RevertsOnInvalidPool() public {
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(PoolFactory.PoolNotFound.selector, 999));
+        factory.rescuePoolERC1155(999, address(0x1), 1, 1, recv);
+    }
+
+    function testRescuePoolERC20_RevertsOnInvalidPool() public {
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(PoolFactory.PoolNotFound.selector, 999));
+        factory.rescuePoolERC20(999, address(0x1), 1, recv);
+    }
+
+    function testRescuePoolETH_RevertsOnInvalidPool() public {
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(PoolFactory.PoolNotFound.selector, 999));
+        factory.rescuePoolETH(999, payable(recv));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //                     LP TOKEN COVERAGE
+    // ─────────────────────────────────────────────────────────────────────────
+
+    function testLPToken_RegisterPool_RevertsOnZeroAddress() public {
+        LPToken lp = new LPToken(address(this), "Test LP");
+        vm.expectRevert(LPToken.ZeroAddress.selector);
+        lp.registerPool(address(0), 1);
+    }
+
+    function testLPToken_RegisterPool_RevertsOnZeroTokenId() public {
+        LPToken lp = new LPToken(address(this), "Test LP");
+        vm.expectRevert(LPToken.InvalidTokenId.selector);
+        lp.registerPool(address(0x1), 0);
+    }
+
+    function testLPToken_RegisterPool_RevertsOnDuplicate() public {
+        LPToken lp = new LPToken(address(this), "Test LP");
+        lp.registerPool(address(0x1), 1);
+        vm.expectRevert(LPToken.TokenIdAlreadyRegistered.selector);
+        lp.registerPool(address(0x2), 1);
+    }
+
+    function testLPToken_RegisterPool_RevertsForNonFactory() public {
+        vm.prank(attacker);
+        vm.expectRevert(LPToken.OnlyFactory.selector);
+        marketALpToken.registerPool(address(0x1), 999);
+    }
+
+    function testLPToken_Mint_RevertsForNonPool() public {
+        vm.prank(attacker);
+        vm.expectRevert(LPToken.OnlyPool.selector);
+        marketALpToken.mint(attacker, lpIdA, 100);
+    }
+
+    function testLPToken_Burn_RevertsForNonPool() public {
+        vm.prank(attacker);
+        vm.expectRevert(LPToken.OnlyPool.selector);
+        marketALpToken.burn(attacker, lpIdA, 100);
+    }
+
+    function testLPToken_Constructor_RevertsOnZeroFactory() public {
+        vm.expectRevert(LPToken.ZeroAddress.selector);
+        new LPToken(address(0), "Test");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //                     SWAP POOL
+    // ─────────────────────────────────────────────────────────────────────────
+
+    function testSwapPool_ReceivesETH() public {
+        vm.deal(address(this), 1 ether);
+        (bool ok,) = address(pool).call{value: 1 ether}("");
+        assertTrue(ok);
+        assertEq(address(pool).balance, 1 ether);
+    }
+
+    function testSwapPool_TotalFeeBps() public view {
+        assertEq(pool.totalFeeBps(), LP_FEE_BPS + PROTOCOL_FEE_BPS);
+    }
+
+    function testSwapPool_RateReturns1e18WhenSupplyZero() public view {
+        assertEq(pool.marketARate(), 1e18);
+        assertEq(pool.marketBRate(), 1e18);
+    }
+
+    function testSwapPool_PhysicalBalanceNorm() public {
+        vm.prank(lp1);
+        pool.deposit(SwapPool.Side.MARKET_A, 100 * MARKET_A_DEC_RAW);
+        assertEq(pool.physicalBalanceNorm(SwapPool.Side.MARKET_A), 100 ether);
+    }
+
+    function testSwapPool_Initialize_RevertsIfAlreadyInitialized() public {
+        vm.prank(address(factory));
+        vm.expectRevert(SwapPool.AlreadyInitialized.selector);
+        pool.initialize(99, 100);
+    }
+
+    function testSwapPool_Initialize_RevertsForNonFactory() public {
+        vm.prank(attacker);
+        vm.expectRevert(SwapPool.Unauthorized.selector);
+        pool.initialize(99, 100);
+    }
+
+    function testSwapPool_SetDepositsPaused_RevertsForNonFactory() public {
+        vm.prank(attacker);
+        vm.expectRevert(SwapPool.Unauthorized.selector);
+        pool.setDepositsPaused(true);
+    }
+
+    function testSwapPool_SetSwapsPaused_RevertsForNonFactory() public {
+        vm.prank(attacker);
+        vm.expectRevert(SwapPool.Unauthorized.selector);
+        pool.setSwapsPaused(true);
+    }
+
+    function testSwapPool_SetResolved_RevertsForNonFactory() public {
+        vm.prank(attacker);
+        vm.expectRevert(SwapPool.Unauthorized.selector);
+        pool.setResolved(true);
+    }
+
+    function testSwapPool_SetResolvedAndPaused_RevertsForNonFactory() public {
+        vm.prank(attacker);
+        vm.expectRevert(SwapPool.Unauthorized.selector);
+        pool.setResolvedAndPaused();
+    }
+
+    function testSwapPool_SetFees_RevertsForNonFactory() public {
+        vm.prank(attacker);
+        vm.expectRevert(SwapPool.Unauthorized.selector);
+        pool.setFees(10, 10);
+    }
+
+    function testSwapPool_SetFees_RevertsOnFeeTooHighLp() public {
+        vm.prank(owner);
+        vm.expectRevert(SwapPool.FeeTooHigh.selector);
+        factory.setPoolFees(0, 101, 10);
+    }
+
+    function testSwapPool_SetFees_RevertsOnFeeTooHighProtocol() public {
+        vm.prank(owner);
+        vm.expectRevert(SwapPool.FeeTooHigh.selector);
+        factory.setPoolFees(0, 10, 51);
+    }
+
 }
