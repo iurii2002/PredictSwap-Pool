@@ -749,6 +749,61 @@ contract PredictSwapV3Test is Test {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    //                                FEE COLLECTOR
+    // ─────────────────────────────────────────────────────────────────────────
+
+    function testFeeCollector_CanReceiveSingleERC1155() public {
+        marketAToken.mint(address(feeCollector), MARKET_A_ID, 50);
+        assertEq(marketAToken.balanceOf(address(feeCollector), MARKET_A_ID), 50);
+    }
+
+    function testFeeCollector_Withdraw_TransfersTokens() public {
+        marketAToken.mint(address(feeCollector), MARKET_A_ID, 1000);
+
+        vm.prank(owner);
+        feeCollector.withdraw(address(marketAToken), MARKET_A_ID, 400, recv);
+
+        assertEq(marketAToken.balanceOf(address(feeCollector), MARKET_A_ID), 600);
+        assertEq(marketAToken.balanceOf(recv, MARKET_A_ID), 400);
+    }
+
+    function testFeeCollector_Withdraw_EmitsEvent() public {
+        marketAToken.mint(address(feeCollector), MARKET_A_ID, 1000);
+
+        vm.prank(owner);
+        vm.expectEmit(true, false, false, true);
+        emit FeeCollector.FeeWithdrawn(address(marketAToken), MARKET_A_ID, 400, recv);
+        feeCollector.withdraw(address(marketAToken), MARKET_A_ID, 400, recv);
+    }
+
+    function testFeeCollector_Withdraw_RevertsForNonOwner() public {
+        marketAToken.mint(address(feeCollector), MARKET_A_ID, 1000);
+
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, attacker));
+        feeCollector.withdraw(address(marketAToken), MARKET_A_ID, 100, recv);
+    }
+
+    function testFeeCollector_WithdrawAll_TransfersEntireBalance() public {
+        marketAToken.mint(address(feeCollector), MARKET_A_ID, 750);
+
+        vm.prank(owner);
+        feeCollector.withdrawAll(address(marketAToken), MARKET_A_ID, recv);
+
+        assertEq(marketAToken.balanceOf(address(feeCollector), MARKET_A_ID), 0);
+        assertEq(marketAToken.balanceOf(recv, MARKET_A_ID), 750);
+    }
+
+    function testFeeCollector_WithdrawAll_EmitsEvent() public {
+        marketAToken.mint(address(feeCollector), MARKET_A_ID, 750);
+
+        vm.prank(owner);
+        vm.expectEmit(true, false, false, true);
+        emit FeeCollector.FeeWithdrawn(address(marketAToken), MARKET_A_ID, 750, recv);
+        feeCollector.withdrawAll(address(marketAToken), MARKET_A_ID, recv);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     //                                FACTORY
     // ─────────────────────────────────────────────────────────────────────────
 
