@@ -1,170 +1,308 @@
-# X-Ray Pre-Audit Report -- PredictSwap v3
+# X-Ray Report
 
-**Branch:** main | **Commit:** 02b05f2 | **Date:** 2026-04-23
-**nSLOC:** 823 | **Contracts:** 4 | **Protocol class:** DEX/AMM (prediction-market swap pool)
+> PredictSwap | 841 nSLOC | a466b8c (`main`) | Foundry | 24/04/26
 
 ---
 
 ## 1. Protocol Overview
 
-PredictSwap v3 is a prediction-market swap pool protocol using ERC-1155 tokens. One `PoolFactory` per project pair deploys `SwapPool` instances for matched market-A / market-B outcomes. LPs deposit to either side and earn fees from 1:1 swaps. A two-bucket JIT lock (fresh/matured) in `LPToken` prevents LP sniping by charging a quick-exit fee on positions held less than 24 hours.
+**What it does:** A 1:1 swap pool for matched ERC-1155 prediction-market shares across two platforms, with single-sided LP positions and per-side rate accounting.
 
-### Contracts
+- **Users**: LPs deposit single-sided shares to earn fees; traders swap shares between platforms at 1:1 minus fees
+- **Core flow**: Deposit ERC-1155 shares on one side, receive LP tokens, swap drains the other side's reserves, LP fee accrues to drained-side rate
+- **Key mechanism**: Simplified 1:1 AMM with dual-value accounting (`aSideValue` / `bSideValue`) in 18-decimal normalized units; no constant-product curve
+- **Token model**: Two ERC-1155 LPToken instances (one per market side), shared across all pools on a factory; LP tokenId mirrors the underlying market tokenId
+- **Admin model**: Owner (intended multisig) controls fees and rescue; Operator (EOA) manages pool lifecycle (create, pause, resolve); no timelock on any action
 
-| Contract | nSLOC | Purpose |
-|---|---|---|
-| `SwapPool.sol` | 441 | Core pool: deposit, swap, withdrawal, withdrawProRata, value accounting |
-| `PoolFactory.sol` | 216 | Registry + deployer. Owner/operator roles. Deploys 2 LPToken instances |
-| `LPToken.sol` | 105 | ERC-1155 LP token with two-bucket JIT lock, pool-only mint/burn |
-| `FeeCollector.sol` | 61 | Accumulates protocol fee cuts; owner can withdraw |
+For a visual overview of the protocol's architecture, see the [architecture diagram](architecture.svg).
 
-### Architecture
+### Contracts in Scope
 
-Users and LPs interact **only with SwapPool** — they never call PoolFactory directly. SwapPool pulls/pushes ERC-1155 prediction-market shares from external market contracts, mints/burns LP via LPToken, and forwards protocol fees to FeeCollector. Owner and Operator manage pools through PoolFactory, which proxies all admin calls to SwapPool (`msg.sender == address(factory)` gate). For a visual overview, see the [architecture diagram](architecture.svg).
+| Subsystem | Key Contracts | nSLOC | Role |
+|-----------|--------------|------:|------|
+| Pool | SwapPool | 459 | 1:1 AMM with dual-value accounting, swap/deposit/withdraw logic |
+| Factory & Registry | PoolFactory | 216 | Deploys pools, manages LP token instances, operator/owner admin |
+| LP Token | LPToken | 105 | ERC-1155 LP positions with per-user two-bucket JIT lock |
+| Fee Collection | FeeCollector | 61 | Accumulates and distributes protocol fee shares |
 
-### Temporal Phases
+### How It Fits Together
 
-1. **Deployment and Initialization** -- Factory deploys SwapPool, registers LP tokenIds, calls `initialize()`.
-2. **Steady State** -- Deposits, swaps, and withdrawals operate. Operator can pause/resolve.
+The core trick: both sides of a prediction market share pair are treated as economically equivalent (1:1), so the pool needs only scalar value tracking per side rather than a bonding curve.
 
-No proxies, no upgrades, no governance, no oracles.
+### Deposit & LP Minting
+
+```
+User
+ └─ SwapPool.deposit(side, amount)
+     ├─ _pullTokens(side, user, amount)         *ERC-1155 safeTransferFrom*
+     ├─ lpMinted = normAmount * supply / sideValue   *1:1 on first deposit*
+     ├─ _addSideValue(side, normAmount)          *aSideValue or bSideValue += norm*
+     └─ _mintLp(side, user, lpMinted)
+         └─ LPToken.mint(user, tokenId, amount)  *triggers _update -> fresh bucket*
+```
+
+### Swap
+
+```
+User
+ └─ SwapPool.swap(fromSide, sharesIn)
+     ├─ _computeFees(normIn) -> lpFee, protocolFee
+     ├─ physicalBalanceNorm(toSide) check         *revert if insufficient*
+     ├─ _pullTokens(fromSide, user, sharesIn)     *input shares enter pool*
+     ├─ _pushTokens(fromSide, feeCollector, rawProtocol)  *protocol fee out*
+     ├─ _pushTokens(toSide, user, rawOut)         *output shares to user*
+     └─ _distributeLpFee(toSide, fromSide, lpFee, normOut)
+         └─ *splits fee between drained-side and from-side LPs by value ratio*
+```
+
+### Withdrawal (swaps active)
+
+```
+User
+ └─ SwapPool.withdrawal(receiveSide, lpAmount, lpSide)
+     ├─ _lpToShares(lpSide, lpAmount) -> shares
+     ├─ fee path: same-side=JIT on fresh only, cross-side=full fee (0 if resolved)
+     ├─ InsufficientLiquidity check on receiveSide
+     ├─ _burnLp(lpSide, user, lpAmount)           *LPToken.burn -> _update*
+     ├─ value accounting: _subSideValue + _distributeLpFee (or redirect if last LP)
+     ├─ _pushTokens(receiveSide, user, rawPayout)
+     ├─ _pushTokens(receiveSide, feeCollector, rawProto)  *if protocolFee > 0*
+     └─ _flushResidualIfEmpty()                   *sweep dust if all LPs gone*
+```
+
+### Withdraw Pro-Rata (swaps paused)
+
+```
+User
+ └─ SwapPool.withdrawProRata(lpAmount, lpSide)
+     ├─ nativeShare = lpAmount * physicalNative / totalSupply  *capped at claim*
+     ├─ crossShare = claim - nativeShare
+     ├─ _burnLp, _subSideValue
+     ├─ _pushTokens(nativeSide, user, rawNative)
+     ├─ _pushTokens(crossSide, user, rawCross)    *remainder in cross tokens*
+     └─ _flushResidualIfEmpty()
+```
 
 ---
 
-## 2. Attack Surface Analysis
+## 2. Threat & Trust Model
 
-### 2.1 Last-LP same-side JIT withdrawal value leak
+### Protocol Threat Profile
 
-- **Location:** `SwapPool.sol:378-382`
-- **Mechanism:** When the last LP on a side withdraws same-side with a JIT fee, `_addSideValue(_oppositeSide(lpSide), lpFee)` inflates the opposite side's tracked value by `lpFee`. However the physical tokens backing that fee remain on the withdrawing side (only the payout is sent; the fee delta stays as physical tokens of `lpSide`). Opposite-side LPs now have an inflated `sideValue` backed partly by tokens on the wrong side, forcing them into `withdrawProRata` to collect.
-- **Impact:** Value misattribution; opposite-side LPs cannot withdraw same-side for the full amount.
-- **Invariants:** I-1, I-2, X-1
+> Protocol classified as: **DEX/AMM** with **Yield Aggregator** characteristics
 
-### 2.2 Cross-side withdrawal LP fee direction divergence
+Swap/deposit/withdraw with LP token mint/burn and fee tiers are classic DEX/AMM signals. Per-side rate growth from accumulated fees mirrors vault-style share appreciation, giving it yield aggregator characteristics.
 
-- **Location:** `SwapPool.sol:387-388`
-- **Mechanism:** On cross-side withdrawal, `_addSideValue(receiveSide, lpFee)` credits the LP fee to the receive side's tracked value. But the physical token for that fee was taken from `receiveSide` physical balance (the payout was reduced). The receive side's physical balance decreases by `shares - lpFee` worth of tokens going out as payout, yet its tracked value increases by `lpFee`. This progressively diverges per-side value from per-side physical holdings.
-- **Impact:** Gradual per-side imbalance. Mitigated by design intent (value is global, physical composition is fluid), but can surprise same-side withdrawers.
-- **Invariants:** I-2, G-2
+### Actors & Adversary Model
 
-### 2.3 LPToken self-transfer fresh bucket corruption
+| Actor | Trust Level | Capabilities |
+|-------|-------------|-------------|
+| Owner | Trusted | `setOperator`, `setFeeCollector`, `setPoolFees`, all `rescuePool*` -- all instant, no timelock. Can also perform operator actions. |
+| Operator | Bounded (lifecycle only) | `createPool`, `setPoolDepositsPaused`, `setPoolSwapsPaused`, `setResolvePool`, `resolvePoolAndPause` -- all instant. Cannot change fees or rescue funds. |
+| User / LP | Untrusted | `deposit`, `swap`, `withdrawal`, `withdrawProRata` -- all nonReentrant-guarded. |
 
-- **Location:** `LPToken.sol:135-189` (`_update` hook)
-- **Mechanism:** When `from == to`, OZ `super._update` is a no-op on balance. The outflow branch reads `preBalance = balanceOf(from, id) + value` -- but the balance did not actually decrease, so `preBalance` overestimates. The inflow branch then adds `value` to `tf.amount`, potentially inflating `fresh.amount` beyond the actual balance. A user with 100 LP who self-transfers 100 would have `fresh.amount = 200` after two iterations.
-- **Impact:** `lockedAmount()` returns inflated value; `_freshConsumedForBurn` overestimates fresh consumed, charging excess JIT fee on next withdrawal.
-- **Invariants:** I-3, X-2
+**Adversary Ranking** (ordered by threat level):
 
-### 2.4 Operator compromise -- instant pause/resolve/create
+1. **MEV searcher / sandwich attacker** -- 1:1 swap pools with fixed fees are sandwich targets when one side has low liquidity; fee is the only slippage.
+2. **Malicious first LP / empty pool attacker** -- First deposit mints LP 1:1 with no minimum liquidity; empty-pool transitions are a known DEX risk surface.
+3. **Compromised operator** -- Can resolve or pause at the wrong time, enabling fee-free withdrawals or blocking user exits.
+4. **Compromised owner** -- Instant fee changes, feeCollector redirect, and rescue powers with no timelock or delay.
+5. **Liquidity manipulation attacker** -- Strategic single-sided deposits and withdrawals to distort the fee distribution ratio in `_distributeLpFee`.
 
-- **Location:** `PoolFactory.sol:138-141, 296-322`
-- **Mechanism:** Operator (or owner) can instantly pause swaps/deposits and resolve pools with no timelock or delay. A compromised operator key can grief all pools simultaneously.
-- **Impact:** Denial of service; forced pro-rata withdrawal at unfavorable composition.
-- **Invariants:** G-5
+See [entry-points.md](entry-points.md) for the full permissionless entry point map.
 
-### 2.5 Permissionless `recordFee` event spoofing
+### Trust Boundaries
 
-- **Location:** `FeeCollector.sol:33-36`
-- **Mechanism:** Anyone can call `recordFee` and emit `FeeReceived` with arbitrary pool, token, and amount values. No balance check.
-- **Impact:** Off-chain indexers that trust `FeeReceived` events without filtering by known pool addresses will have corrupted accounting.
-- **Invariants:** G-6
+- **Factory -> Pool admin** -- all SwapPool admin functions check `msg.sender == address(factory)`; factory immutable. If factory owner key is compromised, every pool is exposed to instant fee changes (up to 1.5%) and fund rescue via `rescueTokens`.
 
-### 2.6 `setFeeCollector` non-propagation to existing pools
+- **Operator lifecycle gate** -- operator can resolve without pausing (`setResolvePool`), waiving all withdrawal fees. Comment at `PoolFactory.sol:314` warns `resolvePoolAndPause` should be used; using `setResolvePool` alone opens a window for fee-free cross-side exits before pause.
 
-- **Location:** `PoolFactory.sol:283-287`, `SwapPool.sol:63`
-- **Mechanism:** `SwapPool.feeCollector` is `immutable`. When the owner calls `factory.setFeeCollector(newAddr)`, only future pools use the new collector. Existing pools continue sending fees to the old address permanently.
-- **Impact:** Protocol fees from existing pools are irrecoverable if the old FeeCollector is abandoned. Owner must be aware of this at deployment time.
-- **Invariants:** G-6
+- **LPToken pool registration** -- one-shot `registerPool` binds tokenId to pool address permanently (`LPToken.sol:101`). Only the registered pool can mint/burn. Factory controls registration; no path to re-register.
 
-### 2.7 `rescueTokens` global surplus cross-side drain
+### Key Attack Surfaces
 
-- **Location:** `SwapPool.sol:548-554`
-- **Mechanism:** `rescueTokens` computes surplus as `totalPhysical(A+B) - totalTracked` globally. If all surplus is physically on side A but the owner calls `rescueTokens(Side.MARKET_B, ...)`, it drains side-B physical tokens that are obligated to side-B LPs. The check passes because global surplus exists.
-- **Impact:** Owner can accidentally drain obligated tokens from one side. Requires owner action (admin-gated).
-- **Invariants:** I-2, E-1
+- **LP fee distribution under extreme side imbalance** &nbsp;&#91;[I-1](invariants.md#i-1), [I-9](invariants.md#i-9)&#93; -- `SwapPool.sol:658-670` `_distributeLpFee` splits fees by `drainedVal / drain` ratio; when `drainedVal` approaches zero but is nonzero, rounding in `(lpFee * drainedVal) / drain` truncates aggressively. Worth tracing whether a strategic sequence of swaps and deposits can direct fee rounding to a controlled side.
 
-### 2.8 Protocol fee truncation on low-decimal tokens
+- **Cross-side withdrawal value accounting with last-LP edge cases** &nbsp;&#91;[I-1](invariants.md#i-1)&#93; -- `SwapPool.sol:381-398` has three branching paths for fee crediting depending on `isLastLp` and `receiveSide == lpSide`; the `isLastLp && lpFee > 0` branch at line 385 redirects fee to opposite side. Worth checking the interaction when BOTH sides' last LPs withdraw in the same block.
 
-- **Location:** `SwapPool.sol:308, 658-662`
-- **Mechanism:** `_fromNorm` truncates normalized amounts: `norm / 10^(18-dec)`. For 6-decimal tokens, a `protocolFee` under `1e12` in normalized units truncates to 0 raw. Small swaps (~1-250 raw units at 10bps protocol fee) yield zero protocol fee -- the fee is computed but never transferred.
-- **Impact:** Protocol revenue leakage on micro-swaps. LP fee is still credited to `sideValue` in normalized form, creating a tiny tracked-vs-physical surplus (rounding dust).
-- **Invariants:** I-1, G-3
+- **JIT fee basis calculation reads before burn** &nbsp;&#91;[I-8](invariants.md#i-8)&#93; -- `SwapPool.sol:607-614` `_freshConsumedForBurn` queries `lp.balanceOf` and `lp.lockedAmount` BEFORE `_burnLp` at line 378. Worth confirming the LPToken `_update` hook's outflow logic at `LPToken.sol:148-167` consumes matured-first correctly when the caller's fresh bucket has a weighted-average timestamp near the 24h boundary.
+
+- **Operator resolve-without-pause window** -- `PoolFactory.sol:308-311` `setResolvePool` sets resolved=true without touching pause flags; `SwapPool.sol:355,362` skip all fees when resolved. Worth tracing whether an attacker monitoring the operator's `setResolvePool` tx can front-run with a cross-side withdrawal to exit at zero fee before `resolvePoolAndPause` lands.
+
+- **ERC-1155 callback during swap state transition** &nbsp;&#91;[X-2](invariants.md#x-2)&#93; -- `SwapPool.sol:305-317` pulls input tokens (triggering `onERC1155Received` on the pool via ERC1155Holder) then pushes output tokens. ReentrancyGuard covers direct reentry, but worth confirming no cross-contract callback path bypasses the guard through the FeeCollector or LPToken interactions in the same call.
+
+- **`withdrawProRata` proportional share uses LP amount not value** &nbsp;&#91;[I-1](invariants.md#i-1)&#93; -- `SwapPool.sol:445` `nativeShare = (lpAmount * availableNative) / totalSupply` divides by LP supply, not sideValue. LPs with accumulated fee gains (rate > 1e18) get a native share proportional to their LP tokens, not their value claim. Worth checking whether this creates an incentive asymmetry between early and late withdrawers during pause.
+
+- **`rescueTokens` surplus calculation is cross-side** -- `SwapPool.sol:556-561` computes global surplus as `totalPhysical - totalTracked` across both sides. A donation to side A creates surplus that could be rescued as side B tokens. Owner-only; no user funds at risk but worth confirming the surplus math accounts for pending fee distributions.
+
+### Protocol-Type Concerns
+
+**As a DEX/AMM:**
+- `SwapPool.sol:268-271` -- first deposit mints LP 1:1 with no minimum liquidity lock. The pool is donation-immune (uses internal accounting, not `balanceOf`), but worth tracing the rate path when the first depositor withdraws immediately with a tiny second depositor present.
+- `SwapPool.sol:686-689` -- `_fromNorm` truncation when converting 18-decimal normalized amounts back to low-decimal tokens (e.g., 6 decimals). A 1 wei normalized amount becomes 0 raw, caught by `SwapTooSmall` / `ZeroAmount` guards, but worth checking dust accumulation across many small swaps.
+
+### Temporal Risk Profile
+
+**Deployment & Initialization:**
+- `SwapPool.sol:194-202` -- `initialize()` is factory-gated (`msg.sender == factory`) and one-shot (`_initialized` latch). No front-running risk since factory calls it atomically in `createPool`.
+- `PoolFactory` constructor deploys LPToken instances and sets immutable market contracts. No post-deployment initialization window.
+
+**Market Stress:**
+- Prediction market resolution creates a binary outcome -- one side's shares become worthless. If operator delays `resolvePoolAndPause`, arbitrageurs with off-chain resolution knowledge can drain the winning side's liquidity via swaps before the pool is frozen.
+
+### Composability & Dependency Risks
+
+**Dependency Risk Map:**
+
+> **ERC-1155 Prediction Market Contracts** -- via `SwapPool._pullTokens / _pushTokens`
+> - Assumes: standard ERC-1155 `safeTransferFrom` transfers exact amounts, no fee-on-transfer, no rebasing
+> - Validates: NONE (no balance-before/after check)
+> - Mutability: Depends on market platform (Polymarket, PredictFun -- could be upgradeable)
+> - On failure: reverts (safeTransferFrom reverts on insufficient balance or approval)
+
+> **OpenZeppelin ERC1155 / Ownable / ReentrancyGuard** -- via inheritance
+> - Assumes: standard OZ v5 behavior for `_update` hook, reentrancy guard, ownership transfer
+> - Validates: N/A (inherited)
+> - Mutability: Immutable (pinned submodule)
+> - On failure: N/A
+
+**Token Assumptions** (unvalidated):
+- ERC-1155 shares: assumes no transfer callbacks that modify pool state beyond the standard `onERC1155Received` hook (which SwapPool accepts via ERC1155Holder)
+- ERC-1155 shares: assumes decimal precision stored at pool creation (`marketADecimals`, `marketBDecimals`) remains accurate for the lifetime of the pool
 
 ---
 
 ## 3. Invariants
 
-See `invariants.md` for the full invariant catalog with concrete derivations.
-
-**Summary:** 6 global (G-1..G-6), 4 inter-contract (I-1..I-4), 3 cross-function (X-1..X-3), 2 edge-case (E-1..E-2).
+> ### Full invariant map: **[invariants.md](invariants.md)**
+>
+> A dedicated reference file contains the complete invariant analysis -- do not look here for the catalog.
+>
+> - **20 Enforced Guards** (`G-1` ... `G-20`) -- per-call preconditions with `Check` / `Location` / `Purpose`
+> - **9 Single-Contract Invariants** (`I-1` ... `I-9`) -- Conservation, Bound, Ratio, StateMachine, Temporal
+> - **3 Cross-Contract Invariants** (`X-1` ... `X-3`) -- caller/callee pairs that cross scope boundaries
+> - **2 Economic Invariants** (`E-1` ... `E-2`) -- higher-order properties deriving from `I-N` + `X-N`
+>
+> Every inferred block cites a concrete delta-pair, guard-lift + write-sites, state edge, temporal predicate, or NatSpec quote. The **On-chain=No** blocks are the high-signal ones -- each is simultaneously an invariant and a potential bug. Attack-surface bullets above cross-link directly into the relevant blocks (e.g. `[X-2]`, `[I-1]`).
 
 ---
 
-## 4. Entry Points
+## 4. Documentation Quality
 
-See `entry-points.md` for the complete entry-point catalog by access level.
+| Aspect | Status | Notes |
+|--------|--------|-------|
+| README | Present | `README.md` -- comprehensive, covers mechanics, fees, roles, architecture, security |
+| NatSpec | ~4 annotations | Sparse; most functions have descriptive comments but few formal NatSpec tags |
+| Spec/Whitepaper | README serves as spec | No separate whitepaper; README documents invariant and fee formulas |
+| Inline Comments | Adequate | Key mechanisms documented (withdrawal rules, fee distribution, JIT lock); some comments have typos |
 
 ---
 
-## 5. Coverage and Testing Assessment
+## 5. Test Analysis
 
-### Current State
+| Metric | Value | Source |
+|--------|-------|--------|
+| Test files | 4 | File scan (always reliable) |
+| Test functions | 167 | File scan (always reliable) |
+| Line coverage | 98.0% (source only) | `forge coverage --ir-minimum` |
+| Branch coverage | 82.6% (source only) | `forge coverage --ir-minimum` |
 
-| Contract | Lines | Stmts | Branches | Funcs |
-|---|---|---|---|---|
-| FeeCollector | 100% | 100% | 100% | 100% |
-| LPToken | 100% | 98.57% | 94.44% | 100% |
-| PoolFactory | 98.91% | 96.30% | 96% | 100% |
-| SwapPool | 96.95% | 92.54% | 71.43% | 100% |
+### Test Depth
 
-### Test Suite Composition
-
-- **162 unit tests** across `PredictSwap.t.sol` (143 tests) and `PredictSwapFuzz.t.sol` (19 fuzz tests)
-- **6 Foundry invariant tests** in `PredictSwapInvariant.t.sol` with handler-based stateful fuzzing
-- **No Echidna, Medusa, Certora, Halmos, or fork tests**
+| Category | Count | Contracts Covered |
+|----------|-------|-------------------|
+| Unit | 148 | SwapPool, PoolFactory, LPToken, FeeCollector |
+| Stateless Fuzz | 19 | SwapPool (conservation, fees, rates, lock, pro-rata) |
+| Stateful Fuzz (Foundry) | 6 | SwapPool (ValueConservation, PoolSolvency, RateAtLeast1e18, FeeBounds, LPSupplyNonNegative, CallSummary) |
+| Formal Verification (Certora) | 0 | none |
+| Formal Verification (Halmos) | 0 | none |
+| Fork | 0 | none |
 
 ### Gaps
 
-- SwapPool branch coverage at 71.43% -- rescue paths and edge-case reverts likely untested
-- No self-transfer test for LPToken (attack surface 2.3)
-- No test for last-LP same-side JIT fee path (attack surface 2.1)
-- No cross-decimal rounding boundary tests (6-dec vs 18-dec edge)
-- Invariant handler does not cover `withdrawProRata` (paused-state path untested by fuzzer)
+- No formal verification (Certora/Halmos/HEVM) for the core accounting math -- given the fee distribution branching and rounding, formal methods would strengthen confidence in the conservation invariant.
+- No fork tests against live prediction market contracts -- integration with real ERC-1155 market behavior is untested.
+- Branch coverage on SwapPool is 73.8% -- the uncovered branches likely include edge cases in fee distribution and rescue paths.
 
 ---
 
-## 6. Code Quality Observations
+## 6. Developer & Git History
 
-- Single developer, 31 commits over 50 days. High test co-change rate (76.9%).
-- Late large commit `98b4e12` "updated to v2" (1204 lines) followed by `02b05f2` "corrected based on ai check" (51 lines) -- high-risk pattern for regression.
-- NatSpec coverage is sparse (~4 documented functions). Internal helpers lack documentation.
-- No external dependencies beyond OZ contracts. Clean import structure.
-- `receive() external payable {}` on SwapPool accepts ETH with no clear purpose beyond `rescueETH`.
-- `FeeCollector.withdrawAllBatch` makes two passes over `tokenIds` calling `balanceOf` each time -- O(2n) external calls. Gas-expensive for large arrays but functionally correct.
+> Repo shape: normal_dev -- normal development history with 16 source-touching commits over 51 days (2026-03-04 to 2026-04-24)
+
+### Contributors
+
+| Author | Commits | Source Lines (+/-) | % of Source Changes |
+|--------|--------:|--------------------|--------------------:|
+| Iurii | 36 | +2935 / -1579 | 100% |
+
+### Review & Process Signals
+
+| Signal | Value | Assessment |
+|--------|-------|------------|
+| Unique contributors | 1 | Single developer |
+| Merge commits | 0 of 36 (0%) | No merge commits -- likely no peer review |
+| Repo age | 2026-03-04 to 2026-04-24 | 51 days |
+| Recent source activity (30d) | 8 commits | Active -- 5 of 8 late commits lack test changes |
+| Test co-change rate | 62.5% | Measures file co-modification in commits, not coverage |
+
+### File Hotspots
+
+| File | Modifications | Note |
+|------|-------------:|------|
+| src/SwapPool.sol | 16 | Highest churn -- prioritize review |
+| src/PoolFactory.sol | 10 | Second-highest churn |
+| src/LPToken.sol | 6 | Moderate churn |
+| src/FeeCollector.sol | 6 | Moderate churn |
+
+### Security-Relevant Commits
+
+| SHA | Date | Subject | Score | Key Signal |
+|-----|------|---------|------:|------------|
+| 00e897d | 2026-03-04 | first full version with tests and deploy | 16 | Tightens access control (+3/-2), changes token transfer and accounting logic |
+| 58cc2a5 | 2026-04-23 | added tests | 15 | Adds 6 runtime guards, tightens access control (+22/-9) |
+| 02b05f2 | 2026-04-23 | corrected based on ai check | 14 | Removes 1 guard, changes accounting -- no test file changes |
+| 98b4e12 | 2026-04-22 | updated to v2 | 13 | Large rewrite (1204 lines), loosens access control (+4/-6), removes 7 guards |
+| 0b9d21f | 2026-03-04 | init | 13 | Initial commit with 45 guards, 9 access control additions |
+
+### Dangerous Area Evolution
+
+| Security Area | Commits | Key Files |
+|--------------|--------:|-----------|
+| fund_flows | 16 | SwapPool.sol, FeeCollector.sol, LPToken.sol |
+| state_machines | 16 | SwapPool.sol, PoolFactory.sol |
+| access_control | 11 | FeeCollector.sol, LPToken.sol, PoolFactory.sol |
+
+### Forked Dependencies
+
+| Library | Path | Upstream | Status | Notes |
+|---------|------|----------|--------|-------|
+| openzeppelin-contracts | lib/openzeppelin-contracts | OpenZeppelin | Submodule | Some pragma ranges differ from modern OZ -- expected for multi-version OZ repo |
+
+### Security Observations
+
+- **Single-developer project** -- Iurii authored 100% of commits; no code review process evident from git history.
+- **No merge commits** -- 0 of 36 commits are merges; all changes are direct pushes.
+- **5 late source commits without test changes** -- `a466b8c`, `f7eea36`, `84a9558`, `02b05f2`, `54b2735` modify SwapPool.sol but do not include test file changes.
+- **SwapPool.sol is the #1 hotspot** -- 16 modifications, including 3 commits in the last 24h touching fee distribution logic.
+- **v2 rewrite (98b4e12) loosened access control** -- removed 7 runtime guards and changed 6 access control patterns in a 1204-line change.
+- **"corrected based on ai check" (02b05f2)** -- score 14, modifies accounting and access control in SwapPool and FeeCollector without test changes.
+
+### Cross-Reference Synthesis
+
+- **SwapPool.sol is #1 in BOTH churn (16 commits) AND attack-surface priority** -- all top-6 surfaces route through it; highest-leverage review: `_distributeLpFee`, `withdrawal` fee branching, `_freshConsumedForBurn`.
+- **Last 3 commits all touch `_distributeLpFee` / fee logic without tests** -- late changes to the most sensitive accounting path carry the highest residual risk.
+- **v2 rewrite removed guards then subsequent commits added new ones** -- `98b4e12` stripped 7 guards, `58cc2a5` added 6 back. Worth confirming the final guard set matches the v2 accounting model.
 
 ---
 
-## 7. X-Ray Verdict
+## X-Ray Verdict
 
-### Tier: FRAGILE
+**ADEQUATE** -- Unit, fuzz, and invariant tests provide strong structural coverage, but no formal verification, no peer review, and no timelock on admin actions.
 
-**Dimension breakdown:**
-
-| Dimension | Rating | Rationale |
-|---|---|---|
-| Tests | HARDENED | Unit (143) + stateless fuzz (19) + stateful invariant (6). Handler covers deposit/swap/withdraw/time-skip. |
-| Docs | FRAGILE | Sparse NatSpec (~4 functions). No specification document. Contract-level comments exist but no formal properties. |
-| Access Control | FRAGILE | Owner/operator roles exist and are enforced, but no timelock on any admin action. Instant resolve + pause. |
-
-**Governing rule:** Tier = min(Tests, Docs, Access Control) = FRAGILE.
-
-### Structural Facts
-
-- 823 nSLOC, 4 contracts, 0 proxies, 0 oracles, 0 governance
-- 5 permissionless entry points, all `nonReentrant + whenInitialized`
-- ERC-1155 only (no ERC-20 pool tokens, no ETH value flow in core paths)
-- 1:1 value model with fee tiers (LP 0-1%, protocol 0-0.5%)
-- Two-bucket JIT lock with 24h maturation and weighted-average timestamp
-- Immutable `feeCollector` per pool; mutable at factory level (non-propagating)
-- Market tokenIds strictly non-reusable per side within a factory
-- `rescueTokens` uses global surplus check, not per-side
-- All admin calls on SwapPool gated by `msg.sender == address(factory)`
+**Structural facts:**
+1. 841 nSLOC across 4 contracts, single-developer project with 36 commits over 51 days
+2. 148 unit + 19 fuzz + 6 stateful invariant tests; 98% source line coverage, 82.6% branch coverage
+3. No timelock on any owner/operator action; owner has instant fee change (up to 1.5%) and rescue powers
+4. 3 commits in the last 24h modify fee distribution logic without corresponding test changes
+5. Zero merge commits -- no evidence of peer review in git history
