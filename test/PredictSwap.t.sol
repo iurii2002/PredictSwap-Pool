@@ -836,6 +836,141 @@ contract PredictSwapV3Test is Test {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    //                          FEE DISTRIBUTION SPLIT
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @dev When drain > drainedSideValue, the fee splits between both sides
+    ///      proportionally to their effective ownership of the drained liquidity.
+    function testFeeDistribution_SwapSplitsWhenOverflow() public {
+        // Step 1: balanced seed
+        _seedBalanced(1000 * MARKET_A_DEC_RAW, 1000 * MARKET_B_DEC_RAW);
+
+        // Step 2: large B→A swap creates A-side overflow into B physical.
+        //   After: aSideValue > physA  ⇒  physB > bSideValue
+        vm.prank(swapper);
+        pool.swap(SwapPool.Side.MARKET_B, 900 * MARKET_B_DEC_RAW);
+
+        uint256 aRateBefore = pool.marketARate();
+        uint256 bRateBefore = pool.marketBRate();
+
+        // Step 3: large A→B swap whose normOut > bSideValue → split triggers.
+        vm.prank(swapper);
+        pool.swap(SwapPool.Side.MARKET_A, 1100 * MARKET_A_DEC_RAW);
+
+        assertGt(pool.marketARate(), aRateBefore, "A rate grew (overflow side got partial fee)");
+        assertGt(pool.marketBRate(), bRateBefore, "B rate grew (drained side got partial fee)");
+        _assertValueInvariant();
+    }
+
+    /// @dev Balanced pool: drain stays within drainedSideValue → no split,
+    ///      only the drained side's rate grows (existing behaviour preserved).
+    function testFeeDistribution_SwapNoSplitWhenBalanced() public {
+        _seedBalanced(1000 * MARKET_A_DEC_RAW, 1000 * MARKET_B_DEC_RAW);
+        uint256 aRateBefore = pool.marketARate();
+        uint256 bRateBefore = pool.marketBRate();
+
+        vm.prank(swapper);
+        pool.swap(SwapPool.Side.MARKET_A, 100 * MARKET_A_DEC_RAW);
+
+        assertEq(pool.marketARate(), aRateBefore, "A rate unchanged (no overflow)");
+        assertGt(pool.marketBRate(), bRateBefore, "B rate grew (100% of fee)");
+        _assertValueInvariant();
+    }
+
+    /// @dev Cross-side withdrawal whose totalOutflow > receiveSideValue splits
+    ///      the LP fee between both sides.
+    function testFeeDistribution_CrossSideWithdrawalSplitsWhenOverflow() public {
+        // Asymmetric seed: large A, small B
+        _deposit(lp1, SwapPool.Side.MARKET_A, 1000 * MARKET_A_DEC_RAW);
+        _deposit(lp2, SwapPool.Side.MARKET_B, 10 * MARKET_B_DEC_RAW);
+
+        // Large B→A swap drains A physical, swells B physical.
+        // After: aSideValue >> physA, physB >> bSideValue.
+        vm.prank(swapper);
+        pool.swap(SwapPool.Side.MARKET_B, 1000 * MARKET_B_DEC_RAW);
+
+        skip(25 hours); // matured — removes JIT fee noise
+
+        uint256 aRateBefore = pool.marketARate();
+        uint256 bRateBefore = pool.marketBRate();
+
+        // lp1 does partial cross-side withdrawal A→B.
+        // totalOutflow ≈ 100 >> bSideValue(10) → split triggers.
+        vm.prank(lp1);
+        pool.withdrawal(SwapPool.Side.MARKET_B, 100 ether, SwapPool.Side.MARKET_A);
+
+        assertGt(pool.marketARate(), aRateBefore, "A rate grew (overflow side got partial fee)");
+        assertGt(pool.marketBRate(), bRateBefore, "B rate grew (drained side got partial fee)");
+        _assertValueInvariant();
+    }
+
+    /// @dev Verifies the split is proportional: drained side with 10% ownership
+    ///      gets ~10% of the fee, not 100%.
+    function testFeeDistribution_SwapSplitIsProportional() public {
+        _seedBalanced(1000 * MARKET_A_DEC_RAW, 1000 * MARKET_B_DEC_RAW);
+
+        // B→A swap: makes aSideValue ≈ 1002.7, physA ≈ 103.6, physB ≈ 1899
+        vm.prank(swapper);
+        pool.swap(SwapPool.Side.MARKET_B, 900 * MARKET_B_DEC_RAW);
+
+        uint256 bValBefore = pool.bSideValue();
+        uint256 aValBefore = pool.aSideValue();
+
+        // A→B swap of 1100: normOut ≈ 1095.6 > bSideValue(1000) → split
+        vm.prank(swapper);
+        pool.swap(SwapPool.Side.MARKET_A, 1100 * MARKET_A_DEC_RAW);
+
+        uint256 bValAfter = pool.bSideValue();
+        uint256 aValAfter = pool.aSideValue();
+
+        uint256 feeToB = bValAfter - bValBefore;
+        uint256 feeToA = aValAfter - aValBefore;
+        uint256 totalLpFee = feeToA + feeToB;
+
+        // B-side owned ~1000/1095.6 ≈ 91.3% of the drained liquidity
+        // So B should get ~91% of the fee, A should get ~9%
+        assertGt(feeToB, 0, "B got some fee");
+        assertGt(feeToA, 0, "A got some fee");
+        assertGt(feeToB, feeToA, "B got more (owns majority of drained liquidity)");
+
+        // B's share should be roughly proportional to bSideValue / normOut
+        // bSideValue=1000, normOut≈1095.6 → B gets ~91.3%
+        uint256 bShareBps = (feeToB * 10000) / totalLpFee;
+        assertGt(bShareBps, 9000, "B share > 90%");
+        assertLt(bShareBps, 9200, "B share < 92%");
+        _assertValueInvariant();
+    }
+
+    /// @dev When the drained side has 0 LPs (drainedVal == 0) but physical
+    ///      tokens exist from the other side's overflow, 100% of the fee
+    ///      goes to the other side.
+    function testFeeDistribution_DrainedSideZeroLP_AllFeeToOtherSide() public {
+        // lp1 deposits A, lp2 deposits B
+        _deposit(lp1, SwapPool.Side.MARKET_A, 1000 * MARKET_A_DEC_RAW);
+        _deposit(lp2, SwapPool.Side.MARKET_B, 100 * MARKET_B_DEC_RAW);
+        skip(25 hours);
+
+        // lp2 withdraws all B-LP cross-side → bSideValue drops to 0,
+        // but physB stays at 100 (withdrawal paid out in A tokens).
+        uint256 bLpBal = marketBLpToken.balanceOf(lp2, lpIdB);
+        vm.prank(lp2);
+        pool.withdrawal(SwapPool.Side.MARKET_A, bLpBal, SwapPool.Side.MARKET_B);
+
+        assertEq(pool.bSideValue(), 0, "B side value is 0");
+        assertGt(pool.physicalBalanceNorm(SwapPool.Side.MARKET_B), 0, "B physical still has tokens");
+
+        uint256 aRateBefore = pool.marketARate();
+
+        // Swap A→B: drained side is B with 0 value → all fee to A
+        vm.prank(swapper);
+        pool.swap(SwapPool.Side.MARKET_A, 50 * MARKET_A_DEC_RAW);
+
+        assertEq(pool.bSideValue(), 0, "B side still 0 (got no fee)");
+        assertGt(pool.marketARate(), aRateBefore, "A rate grew (100% of fee)");
+        _assertValueInvariant();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     //                                FEE COLLECTOR
     // ─────────────────────────────────────────────────────────────────────────
 

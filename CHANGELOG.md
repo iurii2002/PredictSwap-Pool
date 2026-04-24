@@ -1,5 +1,42 @@
 # PredictSwap Pool v3 — CHANGELOG
 
+## v3.1 — Proportional LP fee distribution (`_distributeLpFee`)
+
+**Problem:** When one side's `sideValue` is much smaller than its physical
+balance (because the other side has accumulated value overflow), a swap or
+cross-side withdrawal credited 100% of the LP fee to the drained side's
+few LPs — a windfall disproportionate to their actual liquidity contribution.
+
+Example: pool reserves 510A:1000B but LP values 1400:100. A→B swap of 1000
+sent all LP fee to the 100 B-side LPs, even though 890 of the B-side
+physical tokens were effectively owned by A-side overflow.
+
+**Fix:** New `_distributeLpFee(drainedSide, otherSide, lpFee, drain)` helper
+splits the LP fee proportionally when `drain > drainedSideValue`:
+
+```
+feeToDrained = lpFee × drainedSideValue / drain
+feeToOther   = lpFee − feeToDrained
+```
+
+When `drain ≤ drainedSideValue`, 100% goes to the drained side (unchanged
+behavior). When `drainedSideValue == 0`, 100% goes to the other side.
+
+Applied in two places:
+- `swap()` — drain = `normOut` (net output after fees)
+- `withdrawal()` cross-side — drain = `totalOutflow` (payout + protocolFee)
+
+Invariant `aSideValue + bSideValue == physA + physB` is preserved because
+`feeToDrained + feeToOther == lpFee` always.
+
+**Tests added (4):**
+- `testFeeDistribution_SwapSplitsWhenOverflow` — multi-swap scenario triggers split, both rates grow
+- `testFeeDistribution_SwapNoSplitWhenBalanced` — balanced pool, only drained side rate grows
+- `testFeeDistribution_CrossSideWithdrawalSplitsWhenOverflow` — partial cross-side withdrawal triggers split
+- `testFeeDistribution_SwapSplitIsProportional` — verifies B-side share ≈ 91% when B owns ~91% of drained liquidity
+
+---
+
 ## Summary
 
 v3 consolidates the accounting and withdrawal paths. Each side's LP claim is
@@ -221,11 +258,13 @@ swap(fromSide, sharesIn):
   normOut = normIn − lpFee − protocolFee
   check physicalBalanceNorm(toSide) >= normOut, else InsufficientLiquidity
   pool pushes normOut of toSide to swapper
-  sideValue(toSide) += lpFee   // LP fee accrues to the drained side
+  _distributeLpFee(toSide, fromSide, lpFee, normOut)
 ```
 
-Drained-side attribution: an A→B swap drains B reserves, so the B-side LP
-fee grows `bSideValue` only.
+Fee attribution: if `normOut ≤ toSideValue`, 100% of `lpFee` goes to the
+drained side (same as v3). If `normOut > toSideValue` (overflow from the
+input side), the fee splits proportionally — the drained side gets
+`lpFee × toSideValue / normOut`, the input side gets the rest.
 
 ### Withdrawal (unified)
 
@@ -241,9 +280,10 @@ Must be called while `swapsPaused == false`; reverts `SwapsPaused` otherwise.
   `max(0, lpAmount − matured)` — the LPToken's outflow hook consumes matured
   first, so only the overhang is fee-liable. LP fee stays on `lpSide`.
 - **Cross-side** (`receiveSide != lpSide`): full fee on claim when
-  `!resolved`; free when `resolved`. LP fee is credited to `receiveSide` —
-  the side whose reserves paid out the claim, matching the swap-fee
-  convention.
+  `!resolved`; free when `resolved`. LP fee is distributed via
+  `_distributeLpFee(receiveSide, lpSide, lpFee, totalOutflow)` — if
+  `totalOutflow > receiveSideValue`, the fee splits proportionally between
+  both sides based on effective liquidity ownership.
 - Reverts `InsufficientLiquidity(available, required)` if the pool's
   `physicalBalanceNorm(receiveSide) < payout + protocolFee`. When a side is
   illiquid, the user either takes the other side or (operator pauses) uses
@@ -345,7 +385,7 @@ Summary of changes:
 
 ---
 
-## Test suite (47 passing)
+## Test suite
 
 Categories:
 
@@ -366,6 +406,9 @@ Categories:
 - `ValueInvariant_*` — post-deposit and post-mixed-ops invariant check.
 - `RateAttribution_*` — swap grows drained-side rate only; same-side JIT
   fee grows own rate.
+- `FeeDistribution_*` — proportional fee split when drain exceeds drained-side
+  value (swap overflow, balanced no-split, cross-side withdrawal overflow,
+  proportionality check).
 - `Factory_*` — LP tokenId mirrors market tokenId, side-uniqueness reverts,
   `setResolvePool` toggle, `resolvePoolAndPause` atomic, name storage,
   second-factory with different names.
@@ -377,5 +420,5 @@ Categories:
 Build/test:
 ```
 forge build      # clean compile (src + test + script), solc 0.8.24, via_ir, opt 200
-forge test       # 47 passing
+forge test       # 172 passing (unit + fuzz + invariant)
 ```
