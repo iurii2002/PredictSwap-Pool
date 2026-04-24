@@ -371,11 +371,10 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
         uint256 totalOutflow = payoutNorm + protocolFee; // both leave the pool in receiveSide tokens
         if (totalOutflow > available) revert InsufficientLiquidity(available, totalOutflow);
 
+        uint256 supplyBefore = _lpToken(lpSide).totalSupply(_lpTokenId(lpSide));
+        bool isLastLp = (supplyBefore == lpAmount);
         // Update value: LP fee moves to other side is cross-side
-        if (receiveSide == lpSide) {
-            uint256 supplyBefore = _lpToken(lpSide).totalSupply(_lpTokenId(lpSide));
-            bool isLastLp = (supplyBefore == lpAmount);
-            
+        if (receiveSide == lpSide) {            
             if (isLastLp && lpFee > 0) {
                 // No remaining same-side LPs to benefit from the fee.
                 // Credit it to the other side (they now effectively own the residual).
@@ -386,7 +385,12 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
             }
         } else {
             _subSideValue(lpSide, shares);
-            _distributeLpFee(receiveSide, lpSide, lpFee, totalOutflow);
+            if (isLastLp) {
+                // Last LP on this side — no one left to claim fee remainder.
+                _addSideValue(receiveSide, lpFee);
+            } else {
+                _distributeLpFee(receiveSide, lpSide, lpFee, totalOutflow);
+            }
         }
 
         // Burn LP tokens (triggers LPToken's fresh bucket bookkeeping)
@@ -563,7 +567,8 @@ contract SwapPool is ERC1155Holder, ReentrancyGuard {
         if (to == address(0)) revert ZeroAddress();
         address mktA = _marketContract(Side.MARKET_A);
         address mktB = _marketContract(Side.MARKET_B);
-        if (contractAddress_ == mktA || contractAddress_ == mktB) revert CannotRescuePoolTokens();
+        if ((contractAddress_ == mktA && tokenId_ == marketATokenId) 
+        || (contractAddress_ == mktB && tokenId_ == marketBTokenId)) revert CannotRescuePoolTokens();
         IERC1155(contractAddress_).safeTransferFrom(address(this), to, tokenId_, amount, "");
         emit ERC1155Rescued(contractAddress_, tokenId_, amount, to);
     }
